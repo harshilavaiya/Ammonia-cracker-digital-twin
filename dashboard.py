@@ -28,7 +28,7 @@ st.header("Main Results")
 
 col1, col2, col3 = st.columns(3)
 
-#col1.metric("H2 Product", f"{result['H2 product kg/h']:.3f} kg/h")
+col1.metric("H2 Product", f"{result['H2 product kg/h']:.3f} kg/h")
 col2.metric("H2 Product", f"{result['H2 product Nm3/h']:.2f} Nm³/h")
 col3.metric("N2 Production", f"{result['N2 kg/h']:.3f} kg/h")
 
