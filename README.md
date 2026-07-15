@@ -16,8 +16,6 @@ This project demonstrates how a digital twin can be used to understand and visua
 
 ## 3. Main Reaction
 
-## 3. Main Reaction
-
 The main chemical reaction in this project is ammonia cracking:
 
 ```text
@@ -47,3 +45,17 @@ The model uses this reaction to calculate:
 
 This reaction is the foundation of the mass and energy balance used in the simulation.
 
+## Chart Analysis
+
+The dashboard includes three chart analyses:
+
+1. **H₂ production vs NH₃ feed rate**  
+   Shows how hydrogen production increases as ammonia feed rate increases.
+
+2. **NH₃ slip vs conversion**  
+   Shows how unconverted ammonia decreases as the ammonia conversion approaches 100%.
+
+3. **Net heat demand vs heat recovery efficiency**  
+   Shows how heat recovery reduces the external heat demand of the ammonia cracker.
+
+These charts help understand the relationship between operating conditions and system performance.
