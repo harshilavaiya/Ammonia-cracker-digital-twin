@@ -89,8 +89,10 @@ with col_reason:
 
 st.info(f"Recommended action: {result['Recommended action']}")
 
-st.header("Process Flow")
+st.header("Process Flow Diagram")
 
-st.code("""
-NH3 Feed → Evaporator → Preheater → Cracker Reactor → Cooler → NH3 Removal → H2 Purification → H2 Product
-""")
+st.image(
+    "Ammonia Process Diagram.png",
+    caption="Conceptual process flow diagram of the modular ammonia cracker for decentralized hydrogen production",
+    use_container_width=True
+)
