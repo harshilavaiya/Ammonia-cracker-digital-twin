@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from model import ammonia_cracker_model
 
 
@@ -100,7 +101,12 @@ st.image(
 )
 
 st.header("Chart Analysis")
-st.write("The following charts show how key operating parameters affect hydrogen production, ammonia slip, and heat demand.")
+
+st.markdown("""
+These charts show the sensitivity of the ammonia cracker model to key operating parameters. 
+Each chart changes one parameter while keeping the other selected dashboard inputs constant.
+""")
+
 
 st.subheader("1. H₂ Production vs NH₃ Feed Rate")
 
@@ -119,17 +125,40 @@ for feed in feed_values:
     h2_values.append(temp_result["H2 product kg/h"])
 
 df_h2 = pd.DataFrame({
-    "NH₃ feed rate kg/h": feed_values,
-    "H₂ product kg/h": h2_values
+    "NH3 feed rate (kg/h)": feed_values,
+    "H2 product (kg/h)": h2_values
 })
 
-st.line_chart(df_h2.set_index("NH₃ feed rate kg/h"))
-
-st.caption(
-    "This chart shows how hydrogen production increases with ammonia feed rate at the selected conversion and purification recovery."
+fig_h2 = px.line(
+    df_h2,
+    x="NH3 feed rate (kg/h)",
+    y="H2 product (kg/h)",
+    markers=True,
+    title="Hydrogen Production as a Function of Ammonia Feed Rate"
 )
 
-st.subheader("2. NH₃ Slip vs Conversion")
+fig_h2.update_layout(
+    xaxis_title="NH3 feed rate (kg/h)",
+    yaxis_title="H2 product flow rate (kg/h)",
+    hovermode="x unified"
+)
+
+fig_h2.update_xaxes(
+    dtick=10,
+    rangemode="tozero"
+)
+
+fig_h2.update_yaxes(
+    rangemode="tozero"
+)
+
+st.plotly_chart(fig_h2, use_container_width=True)
+
+st.caption(
+    "This chart shows the hydrogen product flow rate calculated from ammonia feed rate at the selected conversion and H2 recovery."
+)
+
+st.subheader("2. NH₃ Slip vs NH₃ Conversion")
 
 conversion_values = [x / 10 for x in range(900, 1000, 5)]
 slip_values = []
@@ -146,14 +175,37 @@ for conv in conversion_values:
     slip_values.append(temp_result["NH3 slip percent"])
 
 df_slip = pd.DataFrame({
-    "NH₃ conversion %": conversion_values,
-    "NH₃ slip %": slip_values
+    "NH3 conversion (%)": conversion_values,
+    "NH3 slip (%)": slip_values
 })
 
-st.line_chart(df_slip.set_index("NH₃ conversion %"))
+fig_slip = px.line(
+    df_slip,
+    x="NH3 conversion (%)",
+    y="NH3 slip (%)",
+    markers=True,
+    title="Ammonia Slip as a Function of Ammonia Conversion"
+)
+
+fig_slip.update_layout(
+    xaxis_title="NH3 conversion (%)",
+    yaxis_title="NH3 slip relative to feed (%)",
+    hovermode="x unified"
+)
+
+fig_slip.update_xaxes(
+    dtick=1,
+    range=[90, 100]
+)
+
+fig_slip.update_yaxes(
+    rangemode="tozero"
+)
+
+st.plotly_chart(fig_slip, use_container_width=True)
 
 st.caption(
-    "This chart shows that ammonia slip decreases strongly as ammonia conversion approaches 100%."
+    "This chart shows that ammonia slip decreases as ammonia conversion increases. Lower NH3 slip is important for downstream purification and safety."
 )
 
 st.subheader("3. Net Heat Demand vs Heat Recovery Efficiency")
@@ -173,14 +225,75 @@ for hr in heat_recovery_values:
     net_heat_values.append(temp_result["Net heat demand kW"])
 
 df_heat = pd.DataFrame({
-    "Heat recovery efficiency %": heat_recovery_values,
-    "Net heat demand kW": net_heat_values
+    "Heat recovery efficiency (%)": heat_recovery_values,
+    "Net heat demand (kW)": net_heat_values
 })
 
-st.line_chart(df_heat.set_index("Heat recovery efficiency %"))
+fig_heat = px.line(
+    df_heat,
+    x="Heat recovery efficiency (%)",
+    y="Net heat demand (kW)",
+    markers=True,
+    title="Effect of Heat Recovery on Net Heat Demand"
+)
+
+fig_heat.update_layout(
+    xaxis_title="Heat recovery efficiency (%)",
+    yaxis_title="Net heat demand (kW)",
+    hovermode="x unified"
+)
+
+fig_heat.update_xaxes(
+    dtick=10,
+    range=[0, 80]
+)
+
+fig_heat.update_yaxes(
+    rangemode="tozero"
+)
+
+st.plotly_chart(fig_heat, use_container_width=True)
 
 st.caption(
-    "This chart shows how heat recovery reduces the external heat demand of the ammonia cracker."
+    "This chart shows how increasing heat recovery efficiency reduces the external heat demand of the ammonia cracker."
+)
+st.subheader("4. Estimated NH₃ Conversion vs Reactor Temperature")
+
+temperature_values = [500, 550, 600, 650, 700, 750]
+conversion_estimates = [70, 85, 95, 98, 99, 99.5]
+
+df_temp = pd.DataFrame({
+    "Reactor temperature (°C)": temperature_values,
+    "Estimated NH3 conversion (%)": conversion_estimates
+})
+
+fig_temp = px.line(
+    df_temp,
+    x="Reactor temperature (°C)",
+    y="Estimated NH3 conversion (%)",
+    markers=True,
+    title="Estimated Ammonia Conversion as a Function of Reactor Temperature"
+)
+
+fig_temp.update_layout(
+    xaxis_title="Reactor temperature (°C)",
+    yaxis_title="Estimated NH3 conversion (%)",
+    hovermode="x unified"
+)
+
+fig_temp.update_xaxes(
+    dtick=50,
+    range=[500, 750]
+)
+
+fig_temp.update_yaxes(
+    range=[60, 100]
+)
+
+st.plotly_chart(fig_temp, use_container_width=True)
+
+st.caption(
+    "This simplified chart shows the assumed relationship between reactor temperature and ammonia conversion used for conceptual analysis."
 )
 
 st.subheader("Summary of Current Operating Point")
