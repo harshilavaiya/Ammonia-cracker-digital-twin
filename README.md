@@ -13,9 +13,10 @@ The project is developed using Python and Streamlit.
 | File | Purpose |
 | --- | --- |
 | `thermo.py` | Ideal-gas heat capacities, equilibrium constant, equilibrium conversion |
-| `model.py` | Reactor kinetics, mass and energy balance, safety logic |
+| `model.py` | Reactor kinetics, mass and energy balance, purification, safety logic |
+| `dynamics.py` | Transient reactor model for start-up and load following |
 | `dashboard.py` | Streamlit user interface and charts |
-| `test_model.py` | Test suite, run with `pytest -q` |
+| `test_model.py`, `test_dynamics.py` | Test suite, run with `pytest -q` |
 
 ### Running
 
@@ -227,7 +228,59 @@ to 99.99 % brings ammonia within limits but leaves nitrogen and overall purity f
 because those are separation problems rather than reaction problems. Reactor
 performance and product specification are largely decoupled.
 
-## 7. Chart Analysis
+## 7. Start-up and Load Following
+
+Everything above describes the settled operating point. A unit at a refuelling site
+spends a real part of its life warming up or chasing demand, and while it does the
+product is off specification. `dynamics.py` integrates the reactor thermal balance
+over time to show how long that lasts.
+
+The reactor is one lumped thermal mass, catalyst and vessel together:
+
+```text
+M·cp · dT/dt = Q_fired − Q_process(T) − Q_loss(T)
+```
+
+Conversion is evaluated from the instantaneous temperature at every step, so a cold
+reactor makes off-specification gas until it catches up.
+
+### Three details that matter
+
+**The bed is a fixed physical object.** In the steady-state model space velocity is an
+input and bed volume follows from it. In the transient model the bed volume is fixed
+and **space velocity follows the feed**. Turning the plant down therefore lengthens
+residence time and helps conversion; ramping up does the opposite.
+
+**Ammonia is withheld until the bed can crack it.** Feeding a cold bed would push raw
+ammonia straight into the purification train. Feed is admitted at a set temperature,
+which is why the endothermic load arrives as a step rather than gradually.
+
+**The controller is not clairvoyant.** It feeds forward the heat the process draws, but
+learns that load through a first-order lag. Without this a load change produces no
+excursion at all, which is not what a real unit does.
+
+### Typical cold start
+
+From 20 °C to 650 °C at a 10 °C/min ramp limit, with a 40 kg thermal mass and a 30 kW
+burner:
+
+| | |
+| --- | --- |
+| Time to temperature | 63 min |
+| Time to on-specification product | 43 min |
+| Ammonia fed before on-spec | 0.67 kg |
+| Peak firing | 18.2 kW |
+| Binding constraint | ramp rate, not burner capacity |
+
+Two results are worth noticing. **On-specification gas arrives before the reactor
+reaches setpoint**, because ruthenium is active well below 650 °C and the purification
+train cleans up the rest. And the start-up time is set by the **operator's ramp limit**,
+not by the burner: peak firing is 18.2 kW against 30 kW available. Shrinking the burner
+to 16 kW flips the binding constraint, which the model reports.
+
+A 60 % load step produces a ±7 °C excursion that recovers in about three minutes.
+
+## 8. Chart Analysis
 
 The dashboard includes four chart analyses:
 
@@ -261,7 +314,7 @@ The dashboard includes four chart analyses:
 
 These charts help understand the relationship between operating conditions and system performance.
 
-## 8. Limitations
+## 9. Limitations
 
 This is a conceptual model, not a design tool. The main simplifications are:
 
@@ -276,6 +329,9 @@ This is a conceptual model, not a design tool. The main simplifications are:
   its own vapour pressure.
 * The burner is modelled as an efficiency only. NOx formation from firing a gas that
   carries ammonia is a real permitting concern and is not represented.
-* The model is steady state, so start-up, load following and thermal inertia are out
-  of scope.
+* The transient model lumps the reactor into a single temperature. A real bed has an
+  axial profile, and the vessel wall and catalyst do not heat at the same rate.
+* The model predicts; it does not yet listen. A digital twin should ingest measurements
+  from the physical asset and track the divergence between the two. Until it does, this
+  is a simulator rather than a twin.
 * Kinetic parameters are illustrative and have not been fitted to experimental data.

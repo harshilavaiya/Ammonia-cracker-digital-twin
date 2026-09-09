@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from dynamics import simulate, summarise
 from model import (
     CATALYSTS,
     ISO_14687_LIMITS,
@@ -383,6 +384,196 @@ with col_reason:
     st.write(result["Status reason"])
 
 st.info(f"Recommended action: {result['Recommended action']}")
+
+st.header("Start-up and Load Following")
+
+st.write(
+    "Everything above is the settled operating point. A unit at a refuelling site "
+    "spends a real part of its life warming up or chasing demand, and while it does "
+    "the product is off specification. This section integrates the reactor thermal "
+    "balance over time to show how long that lasts."
+)
+
+with st.expander("Transient scenario settings"):
+    tcol1, tcol2, tcol3 = st.columns(3)
+    sim_duration = tcol1.slider("Simulated duration min", 30, 300, 130, step=10)
+    max_ramp = tcol1.slider("Max ramp rate °C/min", 1.0, 30.0, 10.0)
+    burner_capacity = tcol2.slider("Burner capacity kW", 5.0, 80.0, 30.0)
+    thermal_mass = tcol2.slider("Reactor thermal mass kg", 10.0, 300.0, 40.0)
+    feed_admission = tcol3.slider("Feed admission temperature °C", 200, 600, 400)
+    apply_turndown = tcol3.checkbox("Include a load change", value=True)
+    turndown_fraction = tcol3.slider("Turndown to fraction of feed", 0.1, 1.0, 0.4)
+
+
+# The transient model sets its own temperature, space velocity and heat loss,
+# so those are held back from the steady-state inputs it inherits.
+transient_inherited = {
+    key: value
+    for key, value in model_inputs.items()
+    if key not in ("temperature_c", "ghsv_h", "heat_loss_percent")
+}
+
+
+@st.cache_data(show_spinner=False)
+def run_transient(
+    duration, ramp, capacity, mass, admission, turndown, fraction,
+    feed, target_c, design_ghsv, inherited,
+):
+    """Cached so moving an unrelated slider does not re-integrate the run."""
+    history = simulate(
+        duration_min=duration,
+        dt_s=5,
+        target_temperature_c=target_c,
+        max_ramp_c_per_min=ramp,
+        burner_capacity_kw=capacity,
+        thermal_mass_kg=mass,
+        feed_admission_c=admission,
+        nh3_feed_kg_h=feed,
+        design_ghsv_h=design_ghsv,
+        turndown_start_min=duration * 0.7 if turndown else None,
+        turndown_end_min=duration * 0.82 if turndown else None,
+        turndown_fraction=fraction,
+        **inherited,
+    )
+    return history, summarise(history, target_temperature_c=target_c)
+
+
+history, transient = run_transient(
+    sim_duration,
+    max_ramp,
+    burner_capacity,
+    thermal_mass,
+    feed_admission,
+    apply_turndown,
+    turndown_fraction,
+    nh3_feed,
+    temperature,
+    ghsv,
+    transient_inherited,
+)
+
+df_transient = pd.DataFrame(history)
+
+tm1, tm2, tm3, tm4 = st.columns(4)
+
+tm1.metric(
+    "Time to Temperature",
+    f"{transient['Time to temperature min']:.0f} min"
+    if transient["Reached temperature"]
+    else "not reached",
+    delta=f"limited by {transient['Limited by'].lower()}",
+    delta_color="off",
+)
+tm2.metric(
+    "Time to On-Spec Product",
+    f"{transient['Time to on-specification min']:.0f} min"
+    if transient["Reached specification"]
+    else "never",
+)
+tm3.metric(
+    "NH3 Fed Before On-Spec",
+    f"{transient['Ammonia fed before on-spec kg']:.2f} kg",
+)
+tm4.metric("Peak Firing", f"{transient['Peak firing kW']:.1f} kW")
+
+if not transient["Reached temperature"]:
+    st.error(
+        "**The burner cannot reach the setpoint.** Firing sits at its limit and the "
+        "reactor stalls below temperature. Increase burner capacity, cut heat losses, "
+        "or improve the recuperator."
+    )
+elif not transient["Reached specification"]:
+    st.warning(
+        "**The product never reaches specification.** The reactor gets hot, but the "
+        "purification train cannot meet ISO 14687 even at steady state, so warming up "
+        "does not rescue it. This is a separation problem, not a start-up problem."
+    )
+
+fig_temp_time = make_subplots(specs=[[{"secondary_y": True}]])
+
+fig_temp_time.add_trace(
+    go.Scatter(
+        x=df_transient["Time min"], y=df_transient["Setpoint C"],
+        name="Setpoint (°C)", mode="lines", line=dict(dash="dot"),
+    ),
+    secondary_y=False,
+)
+fig_temp_time.add_trace(
+    go.Scatter(
+        x=df_transient["Time min"], y=df_transient["Temperature C"],
+        name="Bed temperature (°C)", mode="lines",
+    ),
+    secondary_y=False,
+)
+fig_temp_time.add_trace(
+    go.Scatter(
+        x=df_transient["Time min"], y=df_transient["Fired kW"],
+        name="Firing rate (kW)", mode="lines",
+    ),
+    secondary_y=True,
+)
+
+fig_temp_time.update_layout(
+    title="Reactor Temperature and Firing Rate Over Time",
+    xaxis_title="Time (min)",
+    legend_title="",
+    hovermode="x unified",
+)
+fig_temp_time.update_yaxes(title_text="Temperature (°C)", secondary_y=False)
+fig_temp_time.update_yaxes(title_text="Firing rate (kW)", rangemode="tozero", secondary_y=True)
+
+st.plotly_chart(fig_temp_time, width="stretch")
+
+fig_quality_time = make_subplots(specs=[[{"secondary_y": True}]])
+
+fig_quality_time.add_trace(
+    go.Scatter(
+        x=df_transient["Time min"], y=df_transient["Conversion percent"],
+        name="Conversion (%)", mode="lines",
+    ),
+    secondary_y=False,
+)
+fig_quality_time.add_trace(
+    go.Scatter(
+        x=df_transient["Time min"],
+        # Break the line while the reactor is dry rather than drawing a
+        # meaningless zero on a log axis.
+        y=df_transient["NH3 product ppmv"].where(df_transient["NH3 feed kg/h"] > 0),
+        name="NH3 in product (ppmv)", mode="lines",
+    ),
+    secondary_y=True,
+)
+
+fig_quality_time.add_hline(
+    y=ISO_14687_LIMITS["nh3_ppmv"],
+    line_dash="dash",
+    line_color="firebrick",
+    annotation_text="ISO 14687 limit",
+    annotation_position="top right",
+    secondary_y=True,
+)
+
+fig_quality_time.update_layout(
+    title="Conversion and Product Quality Over Time",
+    xaxis_title="Time (min)",
+    legend_title="",
+    hovermode="x unified",
+)
+fig_quality_time.update_yaxes(title_text="Conversion (%)", range=[0, 105], secondary_y=False)
+fig_quality_time.update_yaxes(
+    title_text="NH3 in product (ppmv), log scale", type="log", secondary_y=True
+)
+
+st.plotly_chart(fig_quality_time, width="stretch")
+
+st.caption(
+    "Ammonia is withheld until the bed is hot enough to crack it, which is why nothing "
+    "happens on the quality trace early on. When feed is admitted the endothermic load "
+    "arrives faster than the controller learns it, so the bed dips before recovering. "
+    "The load change later in the run does the same in reverse. Note that the bed is a "
+    "fixed physical size here, so turning the plant down lengthens residence time rather "
+    "than shrinking the reactor: space velocity follows the feed instead of setting it."
+)
 
 st.header("Process Flow Diagram")
 
