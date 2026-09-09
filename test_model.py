@@ -112,15 +112,102 @@ def test_reaction_heat_matches_converted_ammonia():
     converted_kmol_h = (
         BASE_CASE["nh3_feed_kg_h"] / MW_NH3 * result["Conversion percent"] / 100
     )
-    expected_kw = converted_kmol_h * 1000 * 46.2 / 3600
+    dh_per_mol_nh3 = thermo.reaction_enthalpy(BASE_CASE["temperature_c"] + 273.15) / 2
+    expected_kw = converted_kmol_h * dh_per_mol_nh3 / 3600
     assert result["Reaction heat kW"] == pytest.approx(expected_kw, rel=1e-9)
 
 
-def test_heat_recovery_reduces_net_duty():
+def test_reaction_enthalpy_grows_with_temperature():
+    # Evaluating at reactor temperature rather than 298 K matters: the duty
+    # is roughly 18 percent higher at 650 C than the textbook 92 kJ figure.
+    assert thermo.reaction_enthalpy(298.15) == pytest.approx(91800, rel=1e-9)
+    assert thermo.reaction_enthalpy(923.15) > 105_000
+
+
+def test_energy_balance_sums_to_total_duty():
     result = ammonia_cracker_model(**BASE_CASE)
-    assert result["Net heat demand kW"] == pytest.approx(
-        result["Reaction heat kW"] * 0.4, rel=1e-9
+    parts = (
+        result["Vaporisation duty kW"]
+        + result["Feed preheat duty kW"]
+        + result["Reaction heat kW"]
+        + result["Heat loss kW"]
     )
+    assert parts == pytest.approx(result["Total heat duty kW"], rel=1e-9)
+    assert result["Net heat demand kW"] == pytest.approx(
+        result["Total heat duty kW"] - result["Recovered heat kW"], rel=1e-9
+    )
+
+
+def test_reaction_heat_alone_understates_the_duty():
+    # The whole point of the energy balance: vaporising and preheating the
+    # feed costs about as much as the reaction itself.
+    result = ammonia_cracker_model(**BASE_CASE)
+    assert result["Total heat duty kW"] > 1.8 * result["Reaction heat kW"]
+
+
+def test_heat_recovery_reduces_net_duty():
+    none = ammonia_cracker_model(**{**BASE_CASE, "heat_recovery_percent": 0})
+    lots = ammonia_cracker_model(**{**BASE_CASE, "heat_recovery_percent": 80})
+    assert none["Recovered heat kW"] == 0
+    assert lots["Net heat demand kW"] < none["Net heat demand kW"]
+
+
+def test_recovery_cannot_exceed_what_the_feed_can_absorb():
+    # A feed/effluent recuperator only preheats the feed, so recovery is
+    # capped by the vaporisation plus preheat duty.
+    result = ammonia_cracker_model(**{**BASE_CASE, "heat_recovery_percent": 100})
+    ceiling = result["Vaporisation duty kW"] + result["Feed preheat duty kW"]
+    assert result["Recovered heat kW"] <= ceiling + 1e-9
+
+
+def test_burning_hydrogen_reduces_saleable_product():
+    result = ammonia_cracker_model(**BASE_CASE)
+    assert result["H2 burned kg/h"] > 0
+    assert result["H2 net kg/h"] == pytest.approx(
+        result["H2 product kg/h"] - result["H2 burned kg/h"], rel=1e-9
+    )
+    assert result["H2 net kg/h"] < result["H2 product kg/h"]
+
+
+def test_hydrogen_burn_is_in_the_expected_range():
+    # Published decentralised crackers divert roughly 15 to 25 percent of
+    # their hydrogen to fire the reaction.
+    result = ammonia_cracker_model(**{**BASE_CASE, "heat_recovery_percent": 70})
+    assert 10 < result["H2 burned percent"] < 30
+
+
+def test_better_recuperation_burns_less_hydrogen():
+    poor = ammonia_cracker_model(**{**BASE_CASE, "heat_recovery_percent": 0})
+    good = ammonia_cracker_model(**{**BASE_CASE, "heat_recovery_percent": 80})
+    assert good["H2 burned percent"] < poor["H2 burned percent"]
+    assert good["System efficiency percent"] > poor["System efficiency percent"]
+
+
+def test_tail_gas_offsets_the_burner_duty():
+    # The hydrogen the purifier rejects is burned rather than wasted, so a
+    # lower recovery leaves more tail gas fuel.
+    lean = ammonia_cracker_model(**{**BASE_CASE, "h2_recovery_percent": 99})
+    rich = ammonia_cracker_model(**{**BASE_CASE, "h2_recovery_percent": 75})
+    assert rich["Tail gas fuel kW"] > lean["Tail gas fuel kW"]
+
+
+def test_system_efficiency_is_below_unity_and_plausible():
+    result = ammonia_cracker_model(**BASE_CASE)
+    assert 50 < result["System efficiency percent"] < 100
+
+
+def test_heat_losses_raise_the_duty():
+    tight = ammonia_cracker_model(**{**BASE_CASE, "heat_loss_percent": 0})
+    leaky = ammonia_cracker_model(**{**BASE_CASE, "heat_loss_percent": 20})
+    assert tight["Heat loss kW"] == 0
+    assert leaky["Total heat duty kW"] > tight["Total heat duty kW"]
+    assert leaky["System efficiency percent"] < tight["System efficiency percent"]
+
+
+def test_cold_feed_costs_more_preheat():
+    warm = ammonia_cracker_model(**{**BASE_CASE, "feed_temperature_c": 25})
+    cold = ammonia_cracker_model(**{**BASE_CASE, "feed_temperature_c": -33})
+    assert cold["Feed preheat duty kW"] > warm["Feed preheat duty kW"]
 
 
 def test_hydrogen_output_is_proportional_to_feed():

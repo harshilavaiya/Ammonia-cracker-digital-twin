@@ -53,7 +53,8 @@ The approximate reaction heat is:
 ΔH ≈ +46.2 kJ per mol NH3
 ```
 
-In this digital twin, the value of 46.2 kJ/mol NH3 is used to estimate the reaction heat demand of the ammonia cracker.
+The model evaluates this enthalpy at reactor temperature rather than at 25 °C, which
+raises it by roughly 18 % at 650 °C.
 
 The model uses this reaction to calculate:
 
@@ -61,8 +62,8 @@ The model uses this reaction to calculate:
 * hydrogen production
 * nitrogen production
 * unconverted ammonia, also called NH3 slip
-* reaction heat demand
-* net heat demand after heat recovery
+* the full heat duty and how much of it the recuperator returns
+* the hydrogen burned to fire the remainder, and the net hydrogen yield
 
 This reaction is the foundation of the mass and energy balance used in the simulation.
 
@@ -131,7 +132,52 @@ literature, and the activation energies sit within the ranges usually quoted.
 A catalyst activity factor between 0 and 1 scales the rate constant, so the effect of
 catalyst deactivation over an operating campaign can be explored.
 
-## 5. Chart Analysis
+## 5. The Energy Balance
+
+The reaction enthalpy alone understates the heat duty by more than half. Ammonia
+arrives as a liquid, so it has to be vaporised and then heated to reactor temperature
+before any of it reacts. The duty is the sum of three terms:
+
+| Term | Basis | Share of duty at the default case |
+| --- | --- | --- |
+| Vaporisation | 23.3 kJ/mol NH₃ | 21 % |
+| Feed preheat | ∫Cp dT from storage to reactor temperature | 25 % |
+| Reaction | ΔH(T) for the fraction that converts | 49 % |
+| Heat loss | user-set percentage | 5 % |
+
+At 10 kg/h of ammonia, 650 °C and 5 bar the total duty is **18.2 kW**, against the
+**7.5 kW** that a reaction-only calculation gives. The two sensible terms are the ones
+a feed/effluent recuperator can give back, which is why its effectiveness dominates
+the design. Recovery is capped by what the feed is able to absorb, since a recuperator
+can only preheat the feed.
+
+### Where the heat comes from
+
+Whatever the recuperator does not return has to be fired. The model burns the tail gas
+first, because the hydrogen the purifier rejects and the ammonia slip are otherwise
+waste, and only then makes up the shortfall from product hydrogen:
+
+```text
+H2 burned = (net duty − tail gas credit) / (LHV_H2 × burner efficiency)
+net H2    = H2 produced − H2 burned
+```
+
+This is the real cost of cracking. At the default operating point the burner takes
+**25 %** of the hydrogen, which is in line with the 15–25 % reported for decentralised
+units, and it falls as the recuperator improves:
+
+| Recuperator effectiveness | Net duty | H₂ to burner | System efficiency |
+| --- | --- | --- | --- |
+| 0 % | 18.2 kW | 32.6 % | 73.1 % |
+| 40 % | 15.8 kW | 27.5 % | 78.6 % |
+| 80 % | 13.3 kW | 22.4 % | 84.1 % |
+
+System efficiency is LHV out over LHV in. Note that cracking is endothermic, so the
+hydrogen leaving carries *more* chemical energy than the ammonia entering; the
+efficiency falls below 100 % only because the unit burns part of its own product to
+supply that energy.
+
+## 6. Chart Analysis
 
 The dashboard includes four chart analyses:
 
@@ -146,8 +192,10 @@ The dashboard includes four chart analyses:
    thermodynamics allows at the selected temperature and pressure and which no amount
    of extra catalyst can beat. Where the two curves meet, the reactor is oversized.
 
-3. **Net heat demand vs heat recovery efficiency**
-   Shows how heat recovery reduces the external heat demand of the ammonia cracker.
+3. **Heat demand and hydrogen cost vs recuperator effectiveness**
+   Net duty on the left axis and the share of hydrogen diverted to the burner on the
+   right. Every kilowatt the recuperator fails to return has to be fired, and the fuel
+   is the product itself, so the right axis is the commercial consequence of the left.
 
 4. **NH₃ conversion vs reactor temperature**
    Predicted conversion plotted against the equilibrium ceiling. The gap between the
@@ -158,15 +206,21 @@ The dashboard includes four chart analyses:
 
 These charts help understand the relationship between operating conditions and system performance.
 
-## 6. Limitations
+## 7. Limitations
 
 This is a conceptual model, not a design tool. The main simplifications are:
 
-* The heat duty counts the reaction enthalpy only. Ammonia vaporisation and feed
-  preheat are not included, so the true duty is roughly twice the reported value.
 * NH₃ slip is reported as a percentage of feed. Fuel-cell grade hydrogen is specified
   in ppm, and reaching that specification requires a purification stage that is not
   yet modelled.
+* System efficiency is a chemical energy balance only. Compression to storage or
+  dispensing pressure and electrical parasitics are excluded, so the reported figure
+  is an upper bound.
+* The latent heat of ammonia is treated as constant at its normal boiling point value,
+  which overstates the vaporisation duty slightly when ammonia is stored warm under
+  its own vapour pressure.
+* The burner is modelled as an efficiency only. NOx formation from firing a gas that
+  carries ammonia is a real permitting concern and is not represented.
 * The model is steady state, so start-up, load following and thermal inertia are out
   of scope.
 * Kinetic parameters are illustrative and have not been fitted to experimental data.

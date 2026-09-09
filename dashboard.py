@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from model import CATALYSTS, ammonia_cracker_model, predict_conversion
 
 
@@ -23,12 +25,33 @@ with st.expander("Main Reaction and Model Explanation"):
 
     Ammonia cracking is an **endothermic reaction**, which means heat must be supplied to the reactor.
 
-    Approximate reaction heat:
+    Approximate reaction heat at standard conditions:
 
     **ΔH ≈ +92.4 kJ per 2 mol NH₃**
     **ΔH ≈ +46.2 kJ per mol NH₃**
 
-    In this digital twin, the value **46.2 kJ/mol NH₃** is used to estimate the reaction heat demand.
+    The model evaluates this enthalpy at reactor temperature rather than at 25 °C,
+    which raises it by roughly 18 % at 650 °C.
+
+    ### How the heat duty is built up
+
+    The reaction enthalpy is only part of the story. Ammonia arrives as a liquid, so
+    the duty is the sum of three terms:
+
+    1. **Vaporisation** of the liquid ammonia, about 23.3 kJ/mol
+    2. **Preheat** of the vapour from storage temperature to reactor temperature
+    3. **Reaction** enthalpy at reactor temperature, for the fraction that converts
+
+    Together these are roughly twice the reaction term alone. Only the two sensible
+    terms can be given back by the feed/effluent recuperator, which is why its
+    effectiveness matters so much.
+
+    Whatever the recuperator does not return has to be **fired**. The purification
+    stage rejects a tail gas containing the hydrogen it could not recover plus the
+    ammonia slip, and that is burned first because it is otherwise waste. Only the
+    shortfall is made up by diverting product hydrogen. Hydrogen burned is hydrogen
+    that cannot be sold, so **net yield**, not raw production, is the number that
+    decides whether the unit is worth running.
 
     ### How conversion is predicted
 
@@ -79,8 +102,13 @@ pressure = st.sidebar.slider("Pressure bar", 1.0, 10.0, 5.0)
 ghsv = st.sidebar.slider("Space velocity GHSV 1/h", 1000, 50000, 5000, step=500)
 catalyst_activity = st.sidebar.slider("Catalyst activity %", 10.0, 100.0, 100.0)
 
+st.sidebar.subheader("Heat integration")
+feed_temperature = st.sidebar.slider("NH3 feed temperature °C", -40, 40, 25)
+heat_recovery = st.sidebar.slider("Recuperator effectiveness %", 0.0, 95.0, 60.0)
+burner_efficiency = st.sidebar.slider("Burner efficiency %", 60.0, 95.0, 85.0)
+heat_loss = st.sidebar.slider("Heat loss %", 0.0, 20.0, 5.0)
+
 st.sidebar.subheader("Downstream")
-heat_recovery = st.sidebar.slider("Heat recovery efficiency %", 0.0, 80.0, 60.0)
 h2_recovery = st.sidebar.slider("H2 purification recovery %", 70.0, 99.0, 95.0)
 
 model_inputs = dict(
@@ -91,6 +119,9 @@ model_inputs = dict(
     ghsv_h=ghsv,
     catalyst=catalyst,
     catalyst_activity_percent=catalyst_activity,
+    feed_temperature_c=feed_temperature,
+    burner_efficiency_percent=burner_efficiency,
+    heat_loss_percent=heat_loss,
 )
 
 result = ammonia_cracker_model(nh3_feed_kg_h=nh3_feed, **model_inputs)
@@ -144,11 +175,73 @@ col4, col5, col6 = st.columns(3)
 
 col4.metric("NH3 Slip", f"{result['NH3 slip kg/h']:.4f} kg/h")
 col5.metric("NH3 Slip", f"{result['NH3 slip percent']:.3f} %")
-col6.metric("Reaction Heat Demand", f"{result['Reaction heat kW']:.2f} kW")
+col6.metric("Total Heat Duty", f"{result['Total heat duty kW']:.2f} kW")
 
-col7 = st.columns(1)[0]
+st.header("Energy Balance and Hydrogen Yield")
 
-col7.metric("Net Heat Demand", f"{result['Net heat demand kW']:.2f} kW")
+st.write(
+    "Cracking is endothermic, and in a decentralised unit that heat comes from "
+    "burning hydrogen. Hydrogen sent to the burner is hydrogen that cannot be sold, "
+    "which makes net yield the number that decides whether the unit is worth running."
+)
+
+if not result["Energy self-sufficient"]:
+    st.error(
+        "**Not energy self-sufficient.** The burner needs more hydrogen than the "
+        "reactor produces, so this operating point cannot sustain itself. Improve "
+        "the recuperator, reduce heat losses, or lower the reactor temperature."
+    )
+
+col_e1, col_e2, col_e3, col_e4 = st.columns(4)
+
+col_e1.metric(
+    "Net H2 Product",
+    f"{result['H2 net kg/h']:.3f} kg/h",
+    delta=f"{result['H2 burned kg/h']:.3f} kg/h to burner",
+    delta_color="inverse",
+)
+col_e2.metric("H2 Diverted to Burner", f"{result['H2 burned percent']:.1f} %")
+col_e3.metric("System Efficiency (LHV)", f"{result['System efficiency percent']:.1f} %")
+col_e4.metric("Net Heat Demand", f"{result['Net heat demand kW']:.2f} kW")
+
+duty_parts = [
+    ("Vaporisation", result["Vaporisation duty kW"]),
+    ("Feed preheat", result["Feed preheat duty kW"]),
+    ("Reaction", result["Reaction heat kW"]),
+    ("Heat loss", result["Heat loss kW"]),
+]
+
+df_duty = pd.DataFrame(
+    [{"Duty": "Heat duty", "Component": name, "kW": value} for name, value in duty_parts]
+)
+
+fig_duty = px.bar(
+    df_duty,
+    x="kW",
+    y="Duty",
+    color="Component",
+    orientation="h",
+    title="Where the Heat Duty Goes",
+)
+
+fig_duty.update_layout(
+    xaxis_title="Heat duty (kW)",
+    yaxis_title="",
+    legend_title="",
+    height=240,
+    hovermode="y unified",
+)
+
+st.plotly_chart(fig_duty, width="stretch")
+
+st.caption(
+    f"The reaction itself is only {result['Reaction heat kW'] / result['Total heat duty kW'] * 100:.0f} % "
+    "of the duty. Vaporising the liquid ammonia and heating it to reactor temperature "
+    "account for most of the rest, and those are the two terms the recuperator can give "
+    f"back. Recuperation returns {result['Recovered heat kW']:.2f} kW and the tail gas "
+    f"rejected by the purifier is worth another {result['Tail gas fuel kW']:.2f} kW of fuel, "
+    f"leaving {result['H2 burned kg/h']:.3f} kg/h of product hydrogen to be burned."
+)
 
 st.header("Safety Assessment")
 
@@ -279,49 +372,64 @@ st.caption(
     "Where the two curves meet, the reactor is oversized."
 )
 
-st.subheader("3. Net Heat Demand vs Heat Recovery Efficiency")
+st.subheader("3. Heat Demand and Hydrogen Cost vs Recuperator Effectiveness")
 
-heat_recovery_values = list(range(0, 85, 5))
-net_heat_values = [
-    ammonia_cracker_model(
+heat_recovery_values = list(range(0, 100, 5))
+heat_rows = []
+
+for value in heat_recovery_values:
+    swept = ammonia_cracker_model(
         nh3_feed_kg_h=nh3_feed,
         **{**model_inputs, "heat_recovery_percent": value},
-    )["Net heat demand kW"]
-    for value in heat_recovery_values
-]
+    )
+    heat_rows.append({
+        "Recuperator effectiveness (%)": value,
+        "Net heat demand (kW)": swept["Net heat demand kW"],
+        "H2 diverted to burner (%)": swept["H2 burned percent"],
+    })
 
-df_heat = pd.DataFrame({
-    "Heat recovery efficiency (%)": heat_recovery_values,
-    "Net heat demand (kW)": net_heat_values
-})
+df_heat = pd.DataFrame(heat_rows)
 
-fig_heat = px.line(
-    df_heat,
-    x="Heat recovery efficiency (%)",
-    y="Net heat demand (kW)",
-    markers=True,
-    title="Effect of Heat Recovery on Net Heat Demand"
+fig_heat = make_subplots(specs=[[{"secondary_y": True}]])
+
+fig_heat.add_trace(
+    go.Scatter(
+        x=df_heat["Recuperator effectiveness (%)"],
+        y=df_heat["Net heat demand (kW)"],
+        name="Net heat demand (kW)",
+        mode="lines+markers",
+    ),
+    secondary_y=False,
+)
+
+fig_heat.add_trace(
+    go.Scatter(
+        x=df_heat["Recuperator effectiveness (%)"],
+        y=df_heat["H2 diverted to burner (%)"],
+        name="H2 diverted to burner (%)",
+        mode="lines+markers",
+    ),
+    secondary_y=True,
 )
 
 fig_heat.update_layout(
-    xaxis_title="Heat recovery efficiency (%)",
-    yaxis_title="Net heat demand (kW)",
-    hovermode="x unified"
+    title="Effect of Heat Recovery on Duty and on Hydrogen Yield",
+    xaxis_title="Recuperator effectiveness (%)",
+    legend_title="",
+    hovermode="x unified",
 )
 
-fig_heat.update_xaxes(
-    dtick=10,
-    range=[0, 80]
-)
-
-fig_heat.update_yaxes(
-    rangemode="tozero"
-)
+fig_heat.update_xaxes(dtick=10, range=[0, 95])
+fig_heat.update_yaxes(title_text="Net heat demand (kW)", rangemode="tozero", secondary_y=False)
+fig_heat.update_yaxes(title_text="H2 diverted to burner (%)", rangemode="tozero", secondary_y=True)
 
 st.plotly_chart(fig_heat, width="stretch")
 
 st.caption(
-    "This chart shows how increasing heat recovery efficiency reduces the external heat demand of the ammonia cracker."
+    "Heat integration is not a comfort feature. Every kilowatt the recuperator fails to "
+    "return has to be fired, and the fuel is the product itself, so the right hand axis "
+    "is the commercial consequence of the left. This is why a cracker is built around its "
+    "heat exchanger rather than around its reactor."
 )
 
 st.subheader("4. NH₃ Conversion vs Reactor Temperature")
@@ -395,10 +503,13 @@ summary_df = pd.DataFrame({
         "Predicted conversion",
         "Equilibrium ceiling",
         "Limiting regime",
-        "H₂ product",
         "NH₃ slip",
-        "Reaction heat demand",
+        "H₂ produced",
+        "H₂ burned for heat",
+        "H₂ net product",
+        "Total heat duty",
         "Net heat demand",
+        "System efficiency (LHV)",
     ],
     "Value": [
         f"{nh3_feed:.2f} kg/h",
@@ -408,10 +519,13 @@ summary_df = pd.DataFrame({
         f"{result['Conversion percent']:.3f} %",
         f"{result['Equilibrium conversion percent']:.3f} %",
         result["Limiting regime"],
-        f"{result['H2 product kg/h']:.3f} kg/h",
         f"{result['NH3 slip percent']:.3f} %",
-        f"{result['Reaction heat kW']:.2f} kW",
+        f"{result['H2 product kg/h']:.3f} kg/h",
+        f"{result['H2 burned kg/h']:.3f} kg/h  ({result['H2 burned percent']:.1f} %)",
+        f"{result['H2 net kg/h']:.3f} kg/h",
+        f"{result['Total heat duty kW']:.2f} kW",
         f"{result['Net heat demand kW']:.2f} kW",
+        f"{result['System efficiency percent']:.1f} %",
     ]
 })
 

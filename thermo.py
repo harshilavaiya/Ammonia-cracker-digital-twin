@@ -31,6 +31,17 @@ T_REF = 298.15  # K
 DH_RXN_REF = 91800.0  # J per 2 mol NH3
 DS_RXN_REF = 198.1    # J/(K * 2 mol NH3)
 
+# Latent heat of vaporisation of ammonia at its normal boiling point of
+# -33.3 C, in J/mol (1371 kJ/kg). Treated as constant, which overstates the
+# duty slightly when ammonia is stored warm under its own vapour pressure.
+DH_VAP_NH3 = 23_300.0
+
+# Lower heating values in J/mol, used for the burner and the efficiency figure.
+LHV = {
+    "H2": 241_800.0,
+    "NH3": 316_800.0,
+}
+
 # Stoichiometric coefficients for the cracking direction, products positive.
 STOICH = {"NH3": -2, "N2": 1, "H2": 3}
 

@@ -17,8 +17,9 @@ MW_N2 = 28.014
 # Molar volume of an ideal gas at normal conditions, Nm3/kmol
 V_MOLAR_NORMAL = 22.414
 
-# Reaction heat used for the duty estimate, kJ per mol NH3 converted.
-DH_RXN_KJ_PER_MOL_NH3 = 46.2
+# Molar quantities from thermo are in J/mol, which is numerically equal to
+# kJ/kmol. Flows here are in kmol/h, so their product is directly kJ/h.
+SECONDS_PER_HOUR = 3600
 
 # Lumped first-order rate parameters per catalyst.
 #
@@ -115,10 +116,16 @@ def ammonia_cracker_model(
     ghsv_h=5000.0,
     catalyst=DEFAULT_CATALYST,
     catalyst_activity_percent=100.0,
+    feed_temperature_c=25.0,
+    burner_efficiency_percent=85.0,
+    heat_loss_percent=5.0,
     conversion_override_percent=None,
 ):
     """
     Solve the mass and energy balance for one cracker module.
+
+    heat_recovery_percent is the effectiveness of the feed/effluent
+    recuperator, not a fraction of the reaction duty.
 
     Pass conversion_override_percent to force a conversion, for example when
     reconciling the model against a measured value from a real unit.
@@ -168,13 +175,86 @@ def ammonia_cracker_model(
     nh3_feed_Nm3_h = nh3_kmol_h * V_MOLAR_NORMAL
     bed_volume_m3 = nh3_feed_Nm3_h / ghsv_h
 
-    # Reaction heat demand
-    # Approx. 46.2 kJ/mol NH3 converted
-    q_reaction_kJ_h = nh3_converted_kmol_h * 1000 * DH_RXN_KJ_PER_MOL_NH3
-    q_reaction_kW = q_reaction_kJ_h / 3600
+    # --- Energy balance ---------------------------------------------------
+    #
+    # The reaction enthalpy alone understates the duty by roughly half. Feed
+    # ammonia arrives as a liquid and has to be vaporised, then heated from
+    # storage temperature to reactor temperature, before any of it reacts.
+    # The three terms are tracked separately because they behave differently:
+    # only the two sensible terms can be recovered from the product stream.
+    temperature_k = temperature_c + 273.15
+    feed_temperature_k = feed_temperature_c + 273.15
 
-    # Net heat demand after heat recovery
-    q_net_kW = q_reaction_kW * (1 - heat_recovery)
+    q_vaporisation_kJ_h = nh3_kmol_h * thermo.DH_VAP_NH3
+    q_preheat_kJ_h = nh3_kmol_h * thermo.enthalpy_change(
+        "NH3", feed_temperature_k, temperature_k
+    )
+    # reaction_enthalpy is per 2 mol NH3, and is evaluated at reactor
+    # temperature rather than at 298 K, which adds about 18 percent.
+    q_reaction_kJ_h = (
+        nh3_converted_kmol_h * thermo.reaction_enthalpy(temperature_k) / 2
+    )
+
+    q_process_kJ_h = q_vaporisation_kJ_h + q_preheat_kJ_h + q_reaction_kJ_h
+    q_loss_kJ_h = q_process_kJ_h * (heat_loss_percent / 100)
+    q_total_kJ_h = q_process_kJ_h + q_loss_kJ_h
+
+    # Heat available in the hot product gas, cooled back to feed temperature.
+    q_products_kJ_h = (
+        h2_kmol_h * thermo.enthalpy_change("H2", feed_temperature_k, temperature_k)
+        + n2_kmol_h * thermo.enthalpy_change("N2", feed_temperature_k, temperature_k)
+        + nh3_unconverted_kmol_h
+        * thermo.enthalpy_change("NH3", feed_temperature_k, temperature_k)
+    )
+
+    # A feed/effluent recuperator can only put heat back into the feed, so
+    # recovery is capped by what the feed is able to absorb.
+    q_recovered_kJ_h = min(
+        heat_recovery * q_products_kJ_h,
+        q_vaporisation_kJ_h + q_preheat_kJ_h,
+    )
+    q_net_kJ_h = q_total_kJ_h - q_recovered_kJ_h
+
+    # --- Burner -----------------------------------------------------------
+    #
+    # The net duty has to be fired. The purification stage rejects a tail gas
+    # carrying the hydrogen it could not recover plus the ammonia slip, and
+    # that gas is burned first because it is otherwise waste. Only the
+    # shortfall is made up by diverting product hydrogen, which is the real
+    # cost of cracking: hydrogen burned is hydrogen not sold.
+    burner_efficiency = burner_efficiency_percent / 100
+
+    h2_rejected_kmol_h = h2_kmol_h * (1 - h2_recovery)
+    q_tail_gas_kJ_h = (
+        h2_rejected_kmol_h * thermo.LHV["H2"]
+        + nh3_unconverted_kmol_h * thermo.LHV["NH3"]
+    ) * burner_efficiency
+
+    q_shortfall_kJ_h = max(0.0, q_net_kJ_h - q_tail_gas_kJ_h)
+    h2_burned_kmol_h = q_shortfall_kJ_h / (thermo.LHV["H2"] * burner_efficiency)
+    h2_burned_kg_h = h2_burned_kmol_h * MW_H2
+
+    h2_net_kg_h = h2_kg_h_product - h2_burned_kg_h
+    h2_net_Nm3_h = (h2_kmol_h * h2_recovery - h2_burned_kmol_h) * V_MOLAR_NORMAL
+    h2_burned_percent = (
+        h2_burned_kg_h / h2_kg_h_product * 100 if h2_kg_h_product > 0 else 0.0
+    )
+    energy_self_sufficient = h2_net_kg_h > 0
+
+    # LHV out over LHV in. This excludes compression and electrical
+    # parasitics, so it is an upper bound on real system efficiency.
+    system_efficiency_percent = (
+        (h2_net_kg_h / MW_H2) * thermo.LHV["H2"] / (nh3_kmol_h * thermo.LHV["NH3"]) * 100
+    )
+
+    q_vaporisation_kW = q_vaporisation_kJ_h / SECONDS_PER_HOUR
+    q_preheat_kW = q_preheat_kJ_h / SECONDS_PER_HOUR
+    q_reaction_kW = q_reaction_kJ_h / SECONDS_PER_HOUR
+    q_loss_kW = q_loss_kJ_h / SECONDS_PER_HOUR
+    q_total_kW = q_total_kJ_h / SECONDS_PER_HOUR
+    q_recovered_kW = q_recovered_kJ_h / SECONDS_PER_HOUR
+    q_net_kW = q_net_kJ_h / SECONDS_PER_HOUR
+    q_tail_gas_kW = q_tail_gas_kJ_h / SECONDS_PER_HOUR
 
     # NH3 slip percentage relative to feed
     nh3_slip_percent = (nh3_slip_kg_h / nh3_feed_kg_h) * 100
@@ -243,8 +323,20 @@ def ammonia_cracker_model(
         "N2 kg/h": n2_kg_h,
         "NH3 slip kg/h": nh3_slip_kg_h,
         "NH3 slip percent": nh3_slip_percent,
+        "Vaporisation duty kW": q_vaporisation_kW,
+        "Feed preheat duty kW": q_preheat_kW,
         "Reaction heat kW": q_reaction_kW,
+        "Heat loss kW": q_loss_kW,
+        "Total heat duty kW": q_total_kW,
+        "Recovered heat kW": q_recovered_kW,
         "Net heat demand kW": q_net_kW,
+        "Tail gas fuel kW": q_tail_gas_kW,
+        "H2 burned kg/h": h2_burned_kg_h,
+        "H2 burned percent": h2_burned_percent,
+        "H2 net kg/h": h2_net_kg_h,
+        "H2 net Nm3/h": h2_net_Nm3_h,
+        "System efficiency percent": system_efficiency_percent,
+        "Energy self-sufficient": energy_self_sufficient,
         "Status": status,
         "Status reason": status_reason,
         "Recommended action": recommended_action,
