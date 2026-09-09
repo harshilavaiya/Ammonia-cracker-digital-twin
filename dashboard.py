@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from model import ammonia_cracker_model
+from model import CATALYSTS, ammonia_cracker_model, predict_conversion
 
 
 st.set_page_config(page_title="Ammonia Cracker Digital Twin", layout="wide")
@@ -18,20 +18,49 @@ with st.expander("Main Reaction and Model Explanation"):
 
     **2 NH₃ → N₂ + 3 H₂**
 
-    This reaction shows that ammonia decomposes into nitrogen and hydrogen.  
+    This reaction shows that ammonia decomposes into nitrogen and hydrogen.
     For every **2 moles of NH₃**, the reactor produces **1 mole of N₂** and **3 moles of H₂**.
 
     Ammonia cracking is an **endothermic reaction**, which means heat must be supplied to the reactor.
 
     Approximate reaction heat:
 
-    **ΔH ≈ +92.4 kJ per 2 mol NH₃**  
+    **ΔH ≈ +92.4 kJ per 2 mol NH₃**
     **ΔH ≈ +46.2 kJ per mol NH₃**
 
     In this digital twin, the value **46.2 kJ/mol NH₃** is used to estimate the reaction heat demand.
 
-    The model uses this reaction to calculate:
+    ### How conversion is predicted
 
+    Conversion is **not** an input to this model. It is calculated from the reactor
+    operating point, because two separate limits decide how much ammonia actually cracks.
+
+    **1. The equilibrium ceiling.** The equilibrium constant is obtained from
+    ΔG°(T) = ΔH°(T) − T·ΔS°(T), with temperature-dependent heat capacities, and
+
+    **K = (y_N₂ · y_H₂³ / y_NH₃²) · P²**
+
+    The **P²** term matters: cracking makes four moles of gas out of two, so raising
+    the pressure pushes the equilibrium back toward ammonia. This is why a cracker
+    wants low pressure even though the downstream purification wants high pressure.
+
+    **2. The kinetic approach.** The catalyst decides how close the reactor gets to
+    that ceiling in the residence time available. The bed is treated as a plug flow
+    reactor with a lumped first-order rate:
+
+    **x = x_eq · (1 − e^(−Da))**, with **Da = k(T) · activity / GHSV**
+
+    Da is the Damköhler number, the ratio of residence time to reaction time. Above
+    roughly Da = 3 the reactor sits at equilibrium and extra catalyst buys nothing.
+    Below it, ammonia slip is set by reactor size rather than by thermodynamics.
+
+    The rate parameters are illustrative rather than measured. They are chosen so the
+    model reproduces published behaviour: ruthenium is effective from about 450 °C,
+    while nickel needs roughly 600–650 °C.
+
+    The model uses this to calculate:
+
+    - Ammonia conversion and the limiting regime
     - Hydrogen production
     - Nitrogen production
     - NH₃ slip
@@ -41,20 +70,67 @@ with st.expander("Main Reaction and Model Explanation"):
 st.sidebar.header("Input Parameters")
 
 nh3_feed = st.sidebar.slider("NH3 feed rate kg/h", 1.0, 100.0, 10.0)
-conversion = st.sidebar.slider("NH3 conversion %", 70.0, 99.9, 98.0)
+
+st.sidebar.subheader("Reactor")
+catalyst = st.sidebar.selectbox("Catalyst", list(CATALYSTS.keys()))
+st.sidebar.caption(CATALYSTS[catalyst]["note"])
 temperature = st.sidebar.slider("Reactor temperature °C", 500, 750, 650)
 pressure = st.sidebar.slider("Pressure bar", 1.0, 10.0, 5.0)
+ghsv = st.sidebar.slider("Space velocity GHSV 1/h", 1000, 50000, 5000, step=500)
+catalyst_activity = st.sidebar.slider("Catalyst activity %", 10.0, 100.0, 100.0)
+
+st.sidebar.subheader("Downstream")
 heat_recovery = st.sidebar.slider("Heat recovery efficiency %", 0.0, 80.0, 60.0)
 h2_recovery = st.sidebar.slider("H2 purification recovery %", 70.0, 99.0, 95.0)
 
-result = ammonia_cracker_model(
-    nh3_feed_kg_h=nh3_feed,
-    conversion_percent=conversion,
+model_inputs = dict(
     heat_recovery_percent=heat_recovery,
     h2_recovery_percent=h2_recovery,
     temperature_c=temperature,
-    pressure_bar=pressure
+    pressure_bar=pressure,
+    ghsv_h=ghsv,
+    catalyst=catalyst,
+    catalyst_activity_percent=catalyst_activity,
 )
+
+result = ammonia_cracker_model(nh3_feed_kg_h=nh3_feed, **model_inputs)
+
+st.header("Reactor Performance")
+
+st.write(
+    "Conversion is predicted from temperature, pressure, space velocity and catalyst. "
+    "It is not a dashboard input."
+)
+
+col_a, col_b, col_c, col_d = st.columns(4)
+
+col_a.metric(
+    "Predicted NH3 Conversion",
+    f"{result['Conversion percent']:.3f} %",
+    delta=f"{result['Conversion percent'] - result['Equilibrium conversion percent']:.3f} pp vs equilibrium",
+    delta_color="off",
+)
+col_b.metric("Equilibrium Ceiling", f"{result['Equilibrium conversion percent']:.3f} %")
+col_c.metric("Damköhler Number", f"{result['Damkohler number']:.2f}")
+col_d.metric("Catalyst Bed Volume", f"{result['Catalyst bed volume m3'] * 1000:.2f} L")
+
+if result["Limiting regime"] == "Kinetically limited":
+    st.warning(
+        f"**{result['Limiting regime']}.** The reactor reaches only "
+        f"{result['Approach to equilibrium percent']:.1f} % of the equilibrium ceiling. "
+        "Raise the temperature, lower the space velocity, or use a more active catalyst."
+    )
+elif result["Limiting regime"] == "Equilibrium limited":
+    st.info(
+        f"**{result['Limiting regime']}.** The catalyst is fast enough, but thermodynamics "
+        f"caps conversion at {result['Equilibrium conversion percent']:.3f} % at "
+        f"{temperature} °C and {pressure} bar. Lower the pressure or raise the temperature."
+    )
+else:
+    st.success(
+        f"**{result['Limiting regime']}.** The reactor is at its equilibrium ceiling and "
+        "extra catalyst volume would not improve conversion."
+    )
 
 st.header("Main Results")
 
@@ -67,7 +143,7 @@ col3.metric("N2 Production", f"{result['N2 kg/h']:.3f} kg/h")
 col4, col5, col6 = st.columns(3)
 
 col4.metric("NH3 Slip", f"{result['NH3 slip kg/h']:.4f} kg/h")
-col5.metric("NH3 Slip", f"{result['NH3 slip percent']:.2f} %")
+col5.metric("NH3 Slip", f"{result['NH3 slip percent']:.3f} %")
 col6.metric("Reaction Heat Demand", f"{result['Reaction heat kW']:.2f} kW")
 
 col7 = st.columns(1)[0]
@@ -97,13 +173,13 @@ st.header("Process Flow Diagram")
 st.image(
     "Ammonia Process Diagram.png",
     caption="Conceptual process flow diagram of the modular ammonia cracker for decentralized hydrogen production",
-    use_container_width=True
+    width="stretch",
 )
 
 st.header("Chart Analysis")
 
 st.markdown("""
-These charts show the sensitivity of the ammonia cracker model to key operating parameters. 
+These charts show the sensitivity of the ammonia cracker model to key operating parameters.
 Each chart changes one parameter while keeping the other selected dashboard inputs constant.
 """)
 
@@ -111,18 +187,10 @@ Each chart changes one parameter while keeping the other selected dashboard inpu
 st.subheader("1. H₂ Production vs NH₃ Feed Rate")
 
 feed_values = list(range(1, 101, 5))
-h2_values = []
-
-for feed in feed_values:
-    temp_result = ammonia_cracker_model(
-        nh3_feed_kg_h=feed,
-        conversion_percent=conversion,
-        heat_recovery_percent=heat_recovery,
-        h2_recovery_percent=h2_recovery,
-        temperature_c=temperature,
-        pressure_bar=pressure
-    )
-    h2_values.append(temp_result["H2 product kg/h"])
+h2_values = [
+    ammonia_cracker_model(nh3_feed_kg_h=feed, **model_inputs)["H2 product kg/h"]
+    for feed in feed_values
+]
 
 df_h2 = pd.DataFrame({
     "NH3 feed rate (kg/h)": feed_values,
@@ -152,77 +220,75 @@ fig_h2.update_yaxes(
     rangemode="tozero"
 )
 
-st.plotly_chart(fig_h2, use_container_width=True)
+st.plotly_chart(fig_h2, width="stretch")
 
 st.caption(
-    "This chart shows the hydrogen product flow rate calculated from ammonia feed rate at the selected conversion and H2 recovery."
+    "Hydrogen output scales linearly with feed because conversion is set by the reactor "
+    "operating point, which does not change along this sweep. The slope is the design "
+    "yield in kg H2 per kg NH3."
 )
 
-st.subheader("2. NH₃ Slip vs NH₃ Conversion")
+st.subheader("2. NH₃ Slip vs Space Velocity")
 
-conversion_values = [x / 10 for x in range(900, 1000, 5)]
-slip_values = []
+ghsv_values = [1000 * i for i in range(1, 101)]
+slip_rows = []
 
-for conv in conversion_values:
-    temp_result = ammonia_cracker_model(
-        nh3_feed_kg_h=nh3_feed,
-        conversion_percent=conv,
-        heat_recovery_percent=heat_recovery,
-        h2_recovery_percent=h2_recovery,
+for value in ghsv_values:
+    reactor = predict_conversion(
         temperature_c=temperature,
-        pressure_bar=pressure
+        pressure_bar=pressure,
+        ghsv_h=value,
+        catalyst=catalyst,
+        catalyst_activity=catalyst_activity / 100,
     )
-    slip_values.append(temp_result["NH3 slip percent"])
+    slip_rows.append({
+        "GHSV (1/h)": value,
+        "NH3 slip (%)": (1 - reactor["conversion"]) * 100,
+        "Equilibrium floor (%)": (1 - reactor["equilibrium_conversion"]) * 100,
+    })
 
-df_slip = pd.DataFrame({
-    "NH3 conversion (%)": conversion_values,
-    "NH3 slip (%)": slip_values
-})
+df_slip = pd.DataFrame(slip_rows)
 
 fig_slip = px.line(
     df_slip,
-    x="NH3 conversion (%)",
-    y="NH3 slip (%)",
-    markers=True,
-    title="Ammonia Slip as a Function of Ammonia Conversion"
+    x="GHSV (1/h)",
+    y=["NH3 slip (%)", "Equilibrium floor (%)"],
+    log_x=True,
+    title="Ammonia Slip as a Function of Space Velocity"
 )
 
 fig_slip.update_layout(
-    xaxis_title="NH3 conversion (%)",
+    xaxis_title="Space velocity GHSV (1/h), log scale",
     yaxis_title="NH3 slip relative to feed (%)",
+    legend_title="",
     hovermode="x unified"
 )
 
-fig_slip.update_xaxes(
-    dtick=1,
-    range=[90, 100]
+fig_slip.update_traces(
+    line=dict(dash="dash"), selector=dict(name="Equilibrium floor (%)")
 )
 
-fig_slip.update_yaxes(
-    rangemode="tozero"
-)
+fig_slip.update_yaxes(rangemode="tozero")
 
-st.plotly_chart(fig_slip, use_container_width=True)
+st.plotly_chart(fig_slip, width="stretch")
 
 st.caption(
-    "This chart shows that ammonia slip decreases as ammonia conversion increases. Lower NH3 slip is important for downstream purification and safety."
+    "This is the reactor sizing trade-off. Low space velocity means a large catalyst bed "
+    "and low slip. The dashed equilibrium floor is the slip that thermodynamics allows at "
+    "this temperature and pressure, and no amount of extra catalyst can go below it. "
+    "Where the two curves meet, the reactor is oversized."
 )
 
 st.subheader("3. Net Heat Demand vs Heat Recovery Efficiency")
 
 heat_recovery_values = list(range(0, 85, 5))
-net_heat_values = []
-
-for hr in heat_recovery_values:
-    temp_result = ammonia_cracker_model(
+net_heat_values = [
+    ammonia_cracker_model(
         nh3_feed_kg_h=nh3_feed,
-        conversion_percent=conversion,
-        heat_recovery_percent=hr,
-        h2_recovery_percent=h2_recovery,
-        temperature_c=temperature,
-        pressure_bar=pressure
-    )
-    net_heat_values.append(temp_result["Net heat demand kW"])
+        **{**model_inputs, "heat_recovery_percent": value},
+    )["Net heat demand kW"]
+    for value in heat_recovery_values
+]
 
 df_heat = pd.DataFrame({
     "Heat recovery efficiency (%)": heat_recovery_values,
@@ -252,48 +318,70 @@ fig_heat.update_yaxes(
     rangemode="tozero"
 )
 
-st.plotly_chart(fig_heat, use_container_width=True)
+st.plotly_chart(fig_heat, width="stretch")
 
 st.caption(
     "This chart shows how increasing heat recovery efficiency reduces the external heat demand of the ammonia cracker."
 )
-st.subheader("4. Estimated NH₃ Conversion vs Reactor Temperature")
 
-temperature_values = [500, 550, 600, 650, 700, 750]
-conversion_estimates = [70, 85, 95, 98, 99, 99.5]
+st.subheader("4. NH₃ Conversion vs Reactor Temperature")
 
-df_temp = pd.DataFrame({
-    "Reactor temperature (°C)": temperature_values,
-    "Estimated NH3 conversion (%)": conversion_estimates
-})
+temperature_values = list(range(400, 760, 10))
+conversion_rows = []
+
+for value in temperature_values:
+    reactor = predict_conversion(
+        temperature_c=value,
+        pressure_bar=pressure,
+        ghsv_h=ghsv,
+        catalyst=catalyst,
+        catalyst_activity=catalyst_activity / 100,
+    )
+    conversion_rows.append({
+        "Reactor temperature (°C)": value,
+        "Predicted conversion (%)": reactor["conversion"] * 100,
+        "Equilibrium ceiling (%)": reactor["equilibrium_conversion"] * 100,
+    })
+
+df_temp = pd.DataFrame(conversion_rows)
 
 fig_temp = px.line(
     df_temp,
     x="Reactor temperature (°C)",
-    y="Estimated NH3 conversion (%)",
-    markers=True,
-    title="Estimated Ammonia Conversion as a Function of Reactor Temperature"
+    y=["Predicted conversion (%)", "Equilibrium ceiling (%)"],
+    title=f"Ammonia Conversion vs Temperature for {catalyst} at {pressure} bar"
 )
 
 fig_temp.update_layout(
     xaxis_title="Reactor temperature (°C)",
-    yaxis_title="Estimated NH3 conversion (%)",
+    yaxis_title="NH3 conversion (%)",
+    legend_title="",
     hovermode="x unified"
 )
 
 fig_temp.update_xaxes(
     dtick=50,
-    range=[500, 750]
+    range=[400, 750]
 )
 
 fig_temp.update_yaxes(
-    range=[60, 100]
+    range=[0, 105]
 )
 
-st.plotly_chart(fig_temp, use_container_width=True)
+fig_temp.add_vline(
+    x=temperature,
+    line_dash="dot",
+    annotation_text="Operating point",
+    annotation_position="top left",
+)
+
+st.plotly_chart(fig_temp, width="stretch")
 
 st.caption(
-    "This simplified chart shows the assumed relationship between reactor temperature and ammonia conversion used for conceptual analysis."
+    "The gap between the two curves is the catalyst's shortfall. On the left the reactor is "
+    "kinetically limited and conversion climbs steeply with temperature. On the right the "
+    "curves merge, the reactor sits on the equilibrium ceiling, and further heating gains "
+    "almost nothing while costing fuel and catalyst life. Switching catalyst moves the knee."
 )
 
 st.subheader("Summary of Current Operating Point")
@@ -301,52 +389,30 @@ st.subheader("Summary of Current Operating Point")
 summary_df = pd.DataFrame({
     "Parameter": [
         "NH₃ feed rate",
-        "Conversion",
+        "Catalyst",
+        "Space velocity",
+        "Catalyst bed volume",
+        "Predicted conversion",
+        "Equilibrium ceiling",
+        "Limiting regime",
         "H₂ product",
         "NH₃ slip",
         "Reaction heat demand",
-        "Net heat demand"
+        "Net heat demand",
     ],
     "Value": [
         f"{nh3_feed:.2f} kg/h",
-        f"{conversion:.2f} %",
+        result["Catalyst"],
+        f"{ghsv:,} 1/h",
+        f"{result['Catalyst bed volume m3'] * 1000:.2f} L",
+        f"{result['Conversion percent']:.3f} %",
+        f"{result['Equilibrium conversion percent']:.3f} %",
+        result["Limiting regime"],
         f"{result['H2 product kg/h']:.3f} kg/h",
-        f"{result['NH3 slip percent']:.2f} %",
+        f"{result['NH3 slip percent']:.3f} %",
         f"{result['Reaction heat kW']:.2f} kW",
-        f"{result['Net heat demand kW']:.2f} kW"
+        f"{result['Net heat demand kW']:.2f} kW",
     ]
 })
 
 st.table(summary_df)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
