@@ -27,6 +27,12 @@ pip install -r requirements.txt
 streamlit run dashboard.py
 ```
 
+To run the tests, install the development extras first:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 ```bash
 pytest -q
 ```

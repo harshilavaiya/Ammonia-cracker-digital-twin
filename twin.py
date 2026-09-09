@@ -27,6 +27,7 @@ assumes it can measure its own internal states is not one.
 import csv
 import math
 import random
+from pathlib import Path
 
 import thermo
 from model import CATALYSTS, MW_NH3, V_MOLAR_NORMAL, ammonia_cracker_model
@@ -445,7 +446,10 @@ DEFAULT_PROCESS = dict(
     psa_n2_rejection_percent=99.95,
 )
 
-CAMPAIGN_PATH = "data/plant_campaign.csv"
+# Anchored to this file rather than the working directory, so the campaign is
+# found however the app is launched. A hosted deployment does not necessarily
+# start the process in the repository root.
+CAMPAIGN_PATH = Path(__file__).resolve().parent / "data" / "plant_campaign.csv"
 
 
 def default_bed_volume_m3():
@@ -456,9 +460,7 @@ def default_bed_volume_m3():
 
 if __name__ == "__main__":
     # Regenerate the committed demonstration campaign.
-    import os
-
-    os.makedirs(os.path.dirname(CAMPAIGN_PATH), exist_ok=True)
+    CAMPAIGN_PATH.parent.mkdir(parents=True, exist_ok=True)
     campaign = generate_campaign(**DEFAULT_CAMPAIGN, **DEFAULT_PROCESS)
     write_csv(campaign, CAMPAIGN_PATH)
     print(f"wrote {len(campaign)} samples to {CAMPAIGN_PATH}")

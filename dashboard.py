@@ -1,5 +1,6 @@
 import csv
 import io
+from pathlib import Path
 
 import streamlit as st
 import pandas as pd
@@ -23,6 +24,10 @@ from model import (
     predict_conversion,
 )
 
+
+# Assets are addressed relative to this file, not the working directory, so
+# the app behaves the same locally and on a hosted runner.
+HERE = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Ammonia Cracker Digital Twin", layout="wide")
 
@@ -763,7 +768,7 @@ if measurements:
 st.header("Process Flow Diagram")
 
 st.image(
-    "Ammonia Process Diagram.png",
+    str(HERE / "Ammonia Process Diagram.png"),
     caption="Conceptual process flow diagram of the modular ammonia cracker for decentralized hydrogen production",
     width="stretch",
 )
