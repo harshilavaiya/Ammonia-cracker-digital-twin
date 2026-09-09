@@ -64,6 +64,7 @@ The model uses this reaction to calculate:
 * unconverted ammonia, also called NH3 slip
 * the full heat duty and how much of it the recuperator returns
 * the hydrogen burned to fire the remainder, and the net hydrogen yield
+* product purity in ppmv against the ISO 14687 specification
 
 This reaction is the foundation of the mass and energy balance used in the simulation.
 
@@ -177,7 +178,56 @@ hydrogen leaving carries *more* chemical energy than the ammonia entering; the
 efficiency falls below 100 % only because the unit burns part of its own product to
 supply that energy.
 
-## 6. Chart Analysis
+## 6. Product Purity and the ISO 14687 Specification
+
+Slip expressed as a percentage of feed flatters the process. What the customer buys is
+measured in ppmv, and **ISO 14687:2019 Grade D**, the specification for hydrogen
+supplied to PEM fuel cell road vehicles, is strict:
+
+| Property | Limit |
+| --- | --- |
+| Hydrogen purity | ≥ 99.97 % |
+| Ammonia | ≤ 0.1 ppmv |
+| Nitrogen | ≤ 300 ppmv |
+
+The ammonia limit is the binding one. At the default operating point the reactor runs
+at 99.7 % conversion, which sounds excellent, but the outlet gas still carries
+**1,636 ppmv** of ammonia. Reaching 0.1 ppmv means removing a factor of **16,361**.
+
+### Two stages, because one is not enough
+
+```text
+reactor  --1636 ppmv-->  guard bed  --16.4 ppmv-->  PSA  --0.115 ppmv-->  product
+```
+
+1. A **scrubber or adsorbent guard bed** takes out the bulk. What it captures leaves as
+   an aqueous waste stream, so it is no longer available to the burner as fuel.
+2. The **PSA** passes a fraction 1/DF of the ammonia reaching it, rejects most of the
+   nitrogen, and recovers only part of the hydrogen. Everything it rejects becomes tail
+   gas, which the burner uses.
+
+Because the two stages multiply, the specification is reachable at all.
+
+### The default train misses, narrowly
+
+With defensible mid-range equipment — 99 % guard bed removal, a PSA decontamination
+factor of 200, 99.9 % nitrogen rejection — the product **fails all three checks**:
+
+| Property | Result | Limit | |
+| --- | --- | --- | --- |
+| Ammonia | 0.115 ppmv | 0.1 | fail |
+| Nitrogen | 351 ppmv | 300 | fail |
+| Purity | 99.9649 % | 99.97 | fail |
+
+Tightening to 99.9 % guard removal, DF 500 and 99.95 % nitrogen rejection passes all
+three, at 0.005 ppmv ammonia and 99.982 % purity.
+
+The instructive part is that **a better reactor does not fix this**. Pushing conversion
+to 99.99 % brings ammonia within limits but leaves nitrogen and overall purity failing,
+because those are separation problems rather than reaction problems. Reactor
+performance and product specification are largely decoupled.
+
+## 7. Chart Analysis
 
 The dashboard includes four chart analyses:
 
@@ -204,15 +254,20 @@ The dashboard includes four chart analyses:
    further heating gains almost nothing while costing fuel and catalyst life.
    Switching catalyst moves the knee.
 
+5. **Product NH₃ vs guard bed removal**
+   Product ammonia on a log axis against guard bed duty, at the currently selected PSA
+   performance, with the ISO limit drawn across it. Where the curve crosses the limit
+   is the guard bed duty this design has to buy.
+
 These charts help understand the relationship between operating conditions and system performance.
 
-## 7. Limitations
+## 8. Limitations
 
 This is a conceptual model, not a design tool. The main simplifications are:
 
-* NH₃ slip is reported as a percentage of feed. Fuel-cell grade hydrogen is specified
-  in ppm, and reaching that specification requires a purification stage that is not
-  yet modelled.
+* Purification stages are modelled as removal factors, not as adsorption beds. Real
+  cycle time, bed sizing, regeneration duty and breakthrough behaviour are out of
+  scope, and the guard bed's aqueous waste stream is reported but not treated.
 * System efficiency is a chemical energy balance only. Compression to storage or
   dispensing pressure and electrical parasitics are excluded, so the reported figure
   is an upper bound.

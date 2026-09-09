@@ -43,6 +43,22 @@ CATALYSTS = {
 
 DEFAULT_CATALYST = "Ru/Al2O3"
 
+# ISO 14687:2019 Grade D, the specification for hydrogen supplied to PEM fuel
+# cell road vehicles. The ammonia limit is the binding one for a cracker: it
+# is four orders of magnitude below a typical reactor outlet.
+ISO_14687_LIMITS = {
+    "h2_purity_percent": 99.97,
+    "nh3_ppmv": 0.1,
+    "n2_ppmv": 300.0,
+}
+
+
+def _ppmv(component_kmol_h, total_kmol_h):
+    """Concentration in parts per million by volume, ideal gas."""
+    if total_kmol_h <= 0:
+        return 0.0
+    return component_kmol_h / total_kmol_h * 1e6
+
 
 def predict_conversion(
     temperature_c,
@@ -119,6 +135,9 @@ def ammonia_cracker_model(
     feed_temperature_c=25.0,
     burner_efficiency_percent=85.0,
     heat_loss_percent=5.0,
+    nh3_guard_removal_percent=99.0,
+    psa_nh3_decontamination_factor=200.0,
+    psa_n2_rejection_percent=99.9,
     conversion_override_percent=None,
 ):
     """
@@ -175,6 +194,46 @@ def ammonia_cracker_model(
     nh3_feed_Nm3_h = nh3_kmol_h * V_MOLAR_NORMAL
     bed_volume_m3 = nh3_feed_Nm3_h / ghsv_h
 
+    # --- Purification -----------------------------------------------------
+    #
+    # Slip expressed as a percentage of feed flatters the process. What the
+    # customer buys is measured in ppmv, and ISO 14687 allows 0.1 ppmv of
+    # ammonia. A reactor running at 99.7 percent conversion still leaves
+    # roughly 1600 ppmv, so the purification train has to remove better than
+    # 99.99 percent of what survives the reactor. That takes two stages: a
+    # scrubber or adsorbent guard bed to take out the bulk, then the PSA,
+    # which rejects ammonia and nitrogen into the tail gas along with the
+    # hydrogen it fails to recover.
+    reactor_outlet_kmol_h = h2_kmol_h + n2_kmol_h + nh3_unconverted_kmol_h
+    nh3_reactor_ppmv = _ppmv(nh3_unconverted_kmol_h, reactor_outlet_kmol_h)
+
+    guard_removal = nh3_guard_removal_percent / 100
+    nh3_after_guard_kmol_h = nh3_unconverted_kmol_h * (1 - guard_removal)
+    nh3_captured_kmol_h = nh3_unconverted_kmol_h - nh3_after_guard_kmol_h
+    after_guard_kmol_h = h2_kmol_h + n2_kmol_h + nh3_after_guard_kmol_h
+    nh3_after_guard_ppmv = _ppmv(nh3_after_guard_kmol_h, after_guard_kmol_h)
+
+    # The PSA passes a fraction 1/DF of the ammonia reaching it, and rejects
+    # most of the nitrogen. Everything it rejects leaves in the tail gas.
+    nh3_product_kmol_h = nh3_after_guard_kmol_h / psa_nh3_decontamination_factor
+    nh3_tail_gas_kmol_h = nh3_after_guard_kmol_h - nh3_product_kmol_h
+    n2_product_kmol_h = n2_kmol_h * (1 - psa_n2_rejection_percent / 100)
+
+    h2_product_kmol_h = h2_kmol_h * h2_recovery
+    product_kmol_h = h2_product_kmol_h + n2_product_kmol_h + nh3_product_kmol_h
+
+    nh3_product_ppmv = _ppmv(nh3_product_kmol_h, product_kmol_h)
+    n2_product_ppmv = _ppmv(n2_product_kmol_h, product_kmol_h)
+    h2_purity_percent = _ppmv(h2_product_kmol_h, product_kmol_h) / 10_000
+
+    iso_checks = {
+        "H2 purity": h2_purity_percent >= ISO_14687_LIMITS["h2_purity_percent"],
+        "NH3": nh3_product_ppmv <= ISO_14687_LIMITS["nh3_ppmv"],
+        "N2": n2_product_ppmv <= ISO_14687_LIMITS["n2_ppmv"],
+    }
+    meets_iso_14687 = all(iso_checks.values())
+    iso_failures = [name for name, passed in iso_checks.items() if not passed]
+
     # --- Energy balance ---------------------------------------------------
     #
     # The reaction enthalpy alone understates the duty by roughly half. Feed
@@ -224,10 +283,13 @@ def ammonia_cracker_model(
     # cost of cracking: hydrogen burned is hydrogen not sold.
     burner_efficiency = burner_efficiency_percent / 100
 
+    # Only the ammonia that survives the guard bed reaches the tail gas. What
+    # the scrubber captures leaves as an aqueous waste stream and is worth
+    # nothing to the burner.
     h2_rejected_kmol_h = h2_kmol_h * (1 - h2_recovery)
     q_tail_gas_kJ_h = (
         h2_rejected_kmol_h * thermo.LHV["H2"]
-        + nh3_unconverted_kmol_h * thermo.LHV["NH3"]
+        + nh3_tail_gas_kmol_h * thermo.LHV["NH3"]
     ) * burner_efficiency
 
     q_shortfall_kJ_h = max(0.0, q_net_kJ_h - q_tail_gas_kJ_h)
@@ -323,6 +385,14 @@ def ammonia_cracker_model(
         "N2 kg/h": n2_kg_h,
         "NH3 slip kg/h": nh3_slip_kg_h,
         "NH3 slip percent": nh3_slip_percent,
+        "NH3 reactor outlet ppmv": nh3_reactor_ppmv,
+        "NH3 after guard bed ppmv": nh3_after_guard_ppmv,
+        "NH3 product ppmv": nh3_product_ppmv,
+        "N2 product ppmv": n2_product_ppmv,
+        "H2 purity percent": h2_purity_percent,
+        "NH3 captured kg/h": nh3_captured_kmol_h * MW_NH3,
+        "Meets ISO 14687": meets_iso_14687,
+        "ISO 14687 failures": iso_failures,
         "Vaporisation duty kW": q_vaporisation_kW,
         "Feed preheat duty kW": q_preheat_kW,
         "Reaction heat kW": q_reaction_kW,

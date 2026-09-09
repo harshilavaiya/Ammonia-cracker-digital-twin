@@ -9,7 +9,12 @@ import math
 import pytest
 
 import thermo
-from model import MW_NH3, ammonia_cracker_model, predict_conversion
+from model import (
+    ISO_14687_LIMITS,
+    MW_NH3,
+    ammonia_cracker_model,
+    predict_conversion,
+)
 
 BASE_CASE = dict(
     nh3_feed_kg_h=10,
@@ -202,6 +207,90 @@ def test_heat_losses_raise_the_duty():
     assert tight["Heat loss kW"] == 0
     assert leaky["Total heat duty kW"] > tight["Total heat duty kW"]
     assert leaky["System efficiency percent"] < tight["System efficiency percent"]
+
+
+# --- purification and product spec ----------------------------------------
+
+def test_reactor_outlet_ammonia_is_orders_of_magnitude_over_spec():
+    # The point of the whole purification section: 0.3 percent slip sounds
+    # small but is roughly 1600 ppmv against a 0.1 ppmv limit.
+    result = ammonia_cracker_model(**BASE_CASE)
+    assert result["NH3 reactor outlet ppmv"] > 1000
+    assert (
+        result["NH3 reactor outlet ppmv"] / ISO_14687_LIMITS["nh3_ppmv"] > 10_000
+    )
+
+
+def test_purification_stages_reduce_ammonia_monotonically():
+    result = ammonia_cracker_model(**BASE_CASE)
+    assert (
+        result["NH3 product ppmv"]
+        < result["NH3 after guard bed ppmv"]
+        < result["NH3 reactor outlet ppmv"]
+    )
+
+
+def test_default_train_misses_the_spec():
+    # Defensible mid-range equipment is not good enough, which is the
+    # engineering problem this section exists to show.
+    result = ammonia_cracker_model(**BASE_CASE)
+    assert not result["Meets ISO 14687"]
+    assert result["ISO 14687 failures"]
+
+
+def test_an_upgraded_train_meets_the_spec():
+    result = ammonia_cracker_model(
+        **BASE_CASE,
+        nh3_guard_removal_percent=99.9,
+        psa_nh3_decontamination_factor=500,
+        psa_n2_rejection_percent=99.95,
+    )
+    assert result["Meets ISO 14687"]
+    assert result["ISO 14687 failures"] == []
+    assert result["NH3 product ppmv"] <= ISO_14687_LIMITS["nh3_ppmv"]
+    assert result["N2 product ppmv"] <= ISO_14687_LIMITS["n2_ppmv"]
+    assert result["H2 purity percent"] >= ISO_14687_LIMITS["h2_purity_percent"]
+
+
+def test_a_better_guard_bed_lowers_product_ammonia():
+    poor = ammonia_cracker_model(**{**BASE_CASE, "nh3_guard_removal_percent": 90})
+    good = ammonia_cracker_model(**{**BASE_CASE, "nh3_guard_removal_percent": 99.9})
+    assert good["NH3 product ppmv"] < poor["NH3 product ppmv"]
+
+
+def test_perfect_conversion_alone_cannot_meet_the_spec():
+    # Nitrogen and overall purity are purification problems, not reactor
+    # problems, so a better reactor does not rescue an undersized PSA.
+    result = ammonia_cracker_model(**BASE_CASE, conversion_override_percent=99.99)
+    assert result["NH3 product ppmv"] <= ISO_14687_LIMITS["nh3_ppmv"]
+    assert not result["Meets ISO 14687"]
+    assert "N2" in result["ISO 14687 failures"]
+
+
+def test_product_composition_sums_to_one_million_ppmv():
+    result = ammonia_cracker_model(**BASE_CASE)
+    total = (
+        result["H2 purity percent"] * 10_000
+        + result["N2 product ppmv"]
+        + result["NH3 product ppmv"]
+    )
+    assert total == pytest.approx(1e6, rel=1e-9)
+
+
+def test_captured_ammonia_leaves_the_tail_gas():
+    # Ammonia caught by the scrubber becomes aqueous waste, so it is no
+    # longer available to the burner as fuel.
+    scrubbed = ammonia_cracker_model(**{**BASE_CASE, "nh3_guard_removal_percent": 99.9})
+    unscrubbed = ammonia_cracker_model(**{**BASE_CASE, "nh3_guard_removal_percent": 0})
+    assert scrubbed["Tail gas fuel kW"] < unscrubbed["Tail gas fuel kW"]
+    assert scrubbed["NH3 captured kg/h"] > unscrubbed["NH3 captured kg/h"]
+
+
+def test_lower_psa_recovery_costs_product_but_feeds_the_burner():
+    lean = ammonia_cracker_model(**{**BASE_CASE, "h2_recovery_percent": 98})
+    rich = ammonia_cracker_model(**{**BASE_CASE, "h2_recovery_percent": 75})
+    assert rich["H2 product kg/h"] < lean["H2 product kg/h"]
+    assert rich["Tail gas fuel kW"] > lean["Tail gas fuel kW"]
 
 
 def test_cold_feed_costs_more_preheat():

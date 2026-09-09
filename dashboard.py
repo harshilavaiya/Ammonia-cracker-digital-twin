@@ -3,7 +3,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from model import CATALYSTS, ammonia_cracker_model, predict_conversion
+from model import (
+    CATALYSTS,
+    ISO_14687_LIMITS,
+    ammonia_cracker_model,
+    predict_conversion,
+)
 
 
 st.set_page_config(page_title="Ammonia Cracker Digital Twin", layout="wide")
@@ -52,6 +57,25 @@ with st.expander("Main Reaction and Model Explanation"):
     shortfall is made up by diverting product hydrogen. Hydrogen burned is hydrogen
     that cannot be sold, so **net yield**, not raw production, is the number that
     decides whether the unit is worth running.
+
+    ### How the product is purified
+
+    ISO 14687 Grade D, the specification for PEM fuel cell vehicles, allows
+    **0.1 ppmv of ammonia**, 300 ppmv of nitrogen and 99.97 % overall purity.
+    A reactor at 99.7 % conversion still leaves roughly **1600 ppmv** of ammonia,
+    so the train has to remove a factor of more than ten thousand.
+
+    No single stage does that, so the model uses two in series:
+
+    1. A **scrubber or adsorbent guard bed** takes out the bulk of the ammonia.
+       What it captures leaves as aqueous waste, not as burner fuel.
+    2. The **PSA** passes a fraction 1/DF of the ammonia that reaches it, rejects
+       most of the nitrogen, and recovers only part of the hydrogen. Everything it
+       rejects goes to the burner as tail gas.
+
+    Because the two stages multiply, the specification is reachable. It is worth
+    noticing that a better reactor does not rescue an undersized PSA: nitrogen and
+    overall purity are separation problems, not reaction problems.
 
     ### How conversion is predicted
 
@@ -108,8 +132,11 @@ heat_recovery = st.sidebar.slider("Recuperator effectiveness %", 0.0, 95.0, 60.0
 burner_efficiency = st.sidebar.slider("Burner efficiency %", 60.0, 95.0, 85.0)
 heat_loss = st.sidebar.slider("Heat loss %", 0.0, 20.0, 5.0)
 
-st.sidebar.subheader("Downstream")
-h2_recovery = st.sidebar.slider("H2 purification recovery %", 70.0, 99.0, 95.0)
+st.sidebar.subheader("Purification")
+nh3_guard_removal = st.sidebar.slider("Guard bed NH3 removal %", 0.0, 99.99, 99.0, step=0.01)
+psa_nh3_df = st.sidebar.slider("PSA NH3 decontamination factor", 1, 1000, 200, step=10)
+psa_n2_rejection = st.sidebar.slider("PSA N2 rejection %", 99.0, 99.99, 99.9, step=0.01)
+h2_recovery = st.sidebar.slider("PSA H2 recovery %", 70.0, 99.0, 95.0)
 
 model_inputs = dict(
     heat_recovery_percent=heat_recovery,
@@ -122,6 +149,9 @@ model_inputs = dict(
     feed_temperature_c=feed_temperature,
     burner_efficiency_percent=burner_efficiency,
     heat_loss_percent=heat_loss,
+    nh3_guard_removal_percent=nh3_guard_removal,
+    psa_nh3_decontamination_factor=psa_nh3_df,
+    psa_n2_rejection_percent=psa_n2_rejection,
 )
 
 result = ammonia_cracker_model(nh3_feed_kg_h=nh3_feed, **model_inputs)
@@ -176,6 +206,99 @@ col4, col5, col6 = st.columns(3)
 col4.metric("NH3 Slip", f"{result['NH3 slip kg/h']:.4f} kg/h")
 col5.metric("NH3 Slip", f"{result['NH3 slip percent']:.3f} %")
 col6.metric("Total Heat Duty", f"{result['Total heat duty kW']:.2f} kW")
+
+st.header("Hydrogen Product Quality")
+
+st.write(
+    "Slip as a percentage of feed flatters the process. What the customer buys is "
+    "measured in ppmv, and ISO 14687 allows 0.1 ppmv of ammonia for PEM fuel cell "
+    "vehicles. This is the specification that decides whether the unit has a market."
+)
+
+col_q1, col_q2, col_q3 = st.columns(3)
+
+
+def spec_metric(column, label, value, limit, unit, above_is_good=False, fmt=",.4g"):
+    passed = value >= limit if above_is_good else value <= limit
+    comparator = "min" if above_is_good else "max"
+    column.metric(
+        label,
+        f"{value:{fmt}} {unit}",
+        delta=f"{'PASS' if passed else 'FAIL'} · {comparator} {limit:g} {unit}",
+        delta_color="normal" if passed else "inverse",
+    )
+
+
+spec_metric(col_q1, "NH₃ in Product", result["NH3 product ppmv"], ISO_14687_LIMITS["nh3_ppmv"], "ppmv")
+spec_metric(col_q2, "N₂ in Product", result["N2 product ppmv"], ISO_14687_LIMITS["n2_ppmv"], "ppmv")
+spec_metric(
+    col_q3,
+    "H₂ Purity",
+    result["H2 purity percent"],
+    ISO_14687_LIMITS["h2_purity_percent"],
+    "%",
+    above_is_good=True,
+    fmt=".5f",
+)
+
+if result["Meets ISO 14687"]:
+    st.success(
+        "**Meets ISO 14687 Grade D.** The product is within specification for PEM "
+        "fuel cell vehicles on ammonia, nitrogen and overall purity."
+    )
+else:
+    st.error(
+        "**Off specification for ISO 14687 Grade D** on "
+        f"{', '.join(result['ISO 14687 failures'])}. Improve the guard bed, the PSA "
+        "decontamination factor, or the nitrogen rejection. Note that a better reactor "
+        "does not fix nitrogen or overall purity, because those are separation problems."
+    )
+
+cascade = [
+    ("Reactor outlet", result["NH3 reactor outlet ppmv"]),
+    ("After guard bed", result["NH3 after guard bed ppmv"]),
+    ("After PSA (product)", result["NH3 product ppmv"]),
+]
+
+df_cascade = pd.DataFrame(
+    [{"Stage": stage, "NH3 (ppmv)": max(value, 1e-6)} for stage, value in cascade]
+)
+
+fig_cascade = px.bar(
+    df_cascade,
+    x="Stage",
+    y="NH3 (ppmv)",
+    log_y=True,
+    text="NH3 (ppmv)",
+    title="Ammonia Through the Purification Train",
+)
+
+fig_cascade.update_traces(texttemplate="%{y:.3g}", textposition="outside")
+
+fig_cascade.add_hline(
+    y=ISO_14687_LIMITS["nh3_ppmv"],
+    line_dash="dash",
+    line_color="firebrick",
+    annotation_text=f"ISO 14687 limit, {ISO_14687_LIMITS['nh3_ppmv']} ppmv",
+    annotation_position="bottom right",
+)
+
+fig_cascade.update_layout(
+    xaxis_title="",
+    yaxis_title="NH3 concentration (ppmv), log scale",
+    height=380,
+)
+
+st.plotly_chart(fig_cascade, width="stretch")
+
+st.caption(
+    f"The reactor leaves {result['NH3 reactor outlet ppmv']:,.0f} ppmv of ammonia and the "
+    f"specification allows {ISO_14687_LIMITS['nh3_ppmv']}, so the train has to remove a factor of "
+    f"{result['NH3 reactor outlet ppmv'] / ISO_14687_LIMITS['nh3_ppmv']:,.0f}. No single stage does "
+    "that, which is why a scrubber or adsorbent guard bed sits ahead of the PSA. The ammonia the "
+    f"guard bed captures leaves as {result['NH3 captured kg/h']:.4f} kg/h of aqueous waste rather "
+    "than as burner fuel."
+)
 
 st.header("Energy Balance and Hydrogen Yield")
 
@@ -492,6 +615,56 @@ st.caption(
     "almost nothing while costing fuel and catalyst life. Switching catalyst moves the knee."
 )
 
+st.subheader("5. Product NH₃ vs Guard Bed Removal")
+
+guard_values = [90 + i * 0.5 for i in range(20)] + [99.9, 99.95, 99.99]
+guard_rows = []
+
+for value in guard_values:
+    swept = ammonia_cracker_model(
+        nh3_feed_kg_h=nh3_feed,
+        **{**model_inputs, "nh3_guard_removal_percent": value},
+    )
+    guard_rows.append({
+        "Guard bed removal (%)": value,
+        "NH3 in product (ppmv)": max(swept["NH3 product ppmv"], 1e-6),
+    })
+
+df_guard = pd.DataFrame(guard_rows)
+
+fig_guard = px.line(
+    df_guard,
+    x="Guard bed removal (%)",
+    y="NH3 in product (ppmv)",
+    log_y=True,
+    markers=True,
+    title="How Much Guard Bed Duty the Specification Demands",
+)
+
+fig_guard.add_hline(
+    y=ISO_14687_LIMITS["nh3_ppmv"],
+    line_dash="dash",
+    line_color="firebrick",
+    annotation_text="ISO 14687 limit",
+    annotation_position="bottom left",
+)
+
+fig_guard.update_layout(
+    xaxis_title="Guard bed NH3 removal (%)",
+    yaxis_title="NH3 in product (ppmv), log scale",
+    hovermode="x unified",
+)
+
+st.plotly_chart(fig_guard, width="stretch")
+
+st.caption(
+    "Everything on this chart is at the currently selected PSA performance, so the curve "
+    "moves when the decontamination factor changes. The two stages multiply, which is the "
+    "only reason the specification is reachable at all: neither a scrubber nor a PSA gets "
+    "there alone. Where the curve crosses the limit is the guard bed duty this design has "
+    "to buy."
+)
+
 st.subheader("Summary of Current Operating Point")
 
 summary_df = pd.DataFrame({
@@ -504,6 +677,10 @@ summary_df = pd.DataFrame({
         "Equilibrium ceiling",
         "Limiting regime",
         "NH₃ slip",
+        "NH₃ in product",
+        "N₂ in product",
+        "H₂ purity",
+        "ISO 14687 Grade D",
         "H₂ produced",
         "H₂ burned for heat",
         "H₂ net product",
@@ -520,6 +697,10 @@ summary_df = pd.DataFrame({
         f"{result['Equilibrium conversion percent']:.3f} %",
         result["Limiting regime"],
         f"{result['NH3 slip percent']:.3f} %",
+        f"{result['NH3 product ppmv']:,.4g} ppmv",
+        f"{result['N2 product ppmv']:,.4g} ppmv",
+        f"{result['H2 purity percent']:.5f} %",
+        "Pass" if result["Meets ISO 14687"] else f"Fail on {', '.join(result['ISO 14687 failures'])}",
         f"{result['H2 product kg/h']:.3f} kg/h",
         f"{result['H2 burned kg/h']:.3f} kg/h  ({result['H2 burned percent']:.1f} %)",
         f"{result['H2 net kg/h']:.3f} kg/h",
