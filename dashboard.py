@@ -1,9 +1,21 @@
+import csv
+import io
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dynamics import simulate, summarise
+from twin import (
+    CAMPAIGN_PATH,
+    CSV_FIELDS,
+    DEFAULT_PROCESS,
+    default_bed_volume_m3,
+    diagnose,
+    read_csv,
+    reconcile,
+)
 from model import (
     CATALYSTS,
     ISO_14687_LIMITS,
@@ -574,6 +586,179 @@ st.caption(
     "fixed physical size here, so turning the plant down lengthens residence time rather "
     "than shrinking the reactor: space velocity follows the feed instead of setting it."
 )
+
+st.header("Live Data and Model Divergence")
+
+st.write(
+    "Everything above is prediction. This section is the part that makes the project "
+    "a twin rather than a simulator: it reads what the asset actually did, runs the "
+    "model on the same measured inputs, and watches the gap. A model that agrees with "
+    "the plant tells you nothing. A residual that drifts tells you something changed."
+)
+
+uploaded = st.file_uploader(
+    "Measurement file (CSV). Leave empty to use the bundled demonstration campaign.",
+    type="csv",
+)
+
+
+@st.cache_data(show_spinner=False)
+def load_campaign(file_bytes):
+    """Read measurements, either uploaded or from the committed campaign."""
+    if file_bytes is None:
+        return read_csv(CAMPAIGN_PATH), CAMPAIGN_PATH
+    text = io.StringIO(file_bytes.decode("utf-8"))
+    rows = [
+        {field: float(row[field]) for field in CSV_FIELDS}
+        for row in csv.DictReader(text)
+    ]
+    return rows, "uploaded file"
+
+
+try:
+    measurements, source = load_campaign(uploaded.getvalue() if uploaded else None)
+except (OSError, KeyError, ValueError) as error:
+    st.error(
+        f"Could not read the measurement file: {error}. Expected columns: "
+        f"{', '.join(CSV_FIELDS)}. Regenerate the bundled campaign with "
+        "`python twin.py`."
+    )
+    measurements, source = [], None
+
+if measurements:
+
+    @st.cache_data(show_spinner=False)
+    def analyse(rows, bed_volume):
+        reconciled = reconcile(rows, bed_volume_m3=bed_volume, **DEFAULT_PROCESS)
+        return reconciled, diagnose(reconciled, **DEFAULT_PROCESS)
+
+    reconciled, findings = analyse(measurements, default_bed_volume_m3())
+    df_twin = pd.DataFrame(reconciled)
+
+    st.caption(
+        f"{len(measurements):,} samples from {source}, covering "
+        f"{measurements[-1]['time_h']:,.0f} operating hours. The measured channels are "
+        "flow, temperature, pressure, an outlet ammonia analyser, burner firing and "
+        "product flow. Conversion and catalyst activity are **inferred**, not measured."
+    )
+
+    if findings["Healthy"]:
+        st.success(
+            "**No divergence detected.** Residuals sit within noise, so the asset is "
+            "behaving as the model says it should."
+        )
+    else:
+        for finding in findings["Findings"]:
+            st.warning(finding)
+
+    dc1, dc2, dc3, dc4 = st.columns(4)
+    dc1.metric(
+        "Estimated Catalyst Activity",
+        f"{findings['Estimated activity percent']:.1f} %"
+        if findings["Estimated activity percent"] is not None
+        else "n/a",
+    )
+    dc2.metric(
+        "Activity Loss per 1000 h",
+        f"{findings['Activity loss per 1000 h']:.2f} pp"
+        if findings["Activity loss per 1000 h"]
+        else "not significant",
+    )
+    dc3.metric(
+        "Off-Spec Threshold",
+        f"{findings['Critical activity percent']:.1f} %"
+        if findings["Critical activity percent"] is not None
+        else "n/a",
+    )
+    dc4.metric(
+        "Catalyst Replacement Due In",
+        f"{findings['Hours to catalyst replacement'] / 24:,.0f} days"
+        if findings["Hours to catalyst replacement"]
+        else "no trend",
+    )
+
+    fig_divergence = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_divergence.add_trace(
+        go.Scatter(
+            x=df_twin["time_h"], y=df_twin["nh3_outlet_ppmv"],
+            name="Measured NH3 outlet (ppmv)", mode="lines", opacity=0.7,
+        ),
+        secondary_y=False,
+    )
+    fig_divergence.add_trace(
+        go.Scatter(
+            x=df_twin["time_h"], y=df_twin["Predicted NH3 outlet ppmv"],
+            name="Model prediction (ppmv)", mode="lines", line=dict(dash="dash"),
+        ),
+        secondary_y=False,
+    )
+    fig_divergence.add_trace(
+        go.Scatter(
+            x=df_twin["time_h"], y=df_twin["Estimated activity percent"],
+            name="Inferred catalyst activity (%)", mode="lines",
+        ),
+        secondary_y=True,
+    )
+    fig_divergence.update_layout(
+        title="What the Plant Did Against What the Model Expected",
+        xaxis_title="Operating hours",
+        legend_title="",
+        hovermode="x unified",
+    )
+    fig_divergence.update_yaxes(title_text="NH3 at reactor outlet (ppmv)", secondary_y=False)
+    fig_divergence.update_yaxes(
+        title_text="Inferred activity (%)", range=[0, 120], secondary_y=True
+    )
+
+    st.plotly_chart(fig_divergence, width="stretch")
+
+    st.caption(
+        "The dashed line is the model running on nameplate parameters. It stays flat, "
+        "because nothing in the operating conditions changed. The measurement climbs "
+        "away from it, and the gap, converted back into a catalyst activity, is the "
+        "diagnosis. Over this campaign conversion falls by roughly a quarter of a "
+        "percentage point, which nobody would notice on a trend display, while the "
+        "ammonia the purification train has to handle rises by half again."
+    )
+
+    fig_residuals = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_residuals.add_trace(
+        go.Scatter(
+            x=df_twin["time_h"], y=df_twin["Conversion residual pp"],
+            name="Conversion residual (pp)", mode="lines", opacity=0.8,
+        ),
+        secondary_y=False,
+    )
+    fig_residuals.add_trace(
+        go.Scatter(
+            x=df_twin["time_h"], y=df_twin["Fired residual kW"],
+            name="Firing residual (kW)", mode="lines", opacity=0.8,
+        ),
+        secondary_y=True,
+    )
+    fig_residuals.add_hline(y=0, line_dash="dot", line_color="grey")
+    fig_residuals.update_layout(
+        title="Two Residuals, Two Different Faults",
+        xaxis_title="Operating hours",
+        legend_title="",
+        hovermode="x unified",
+    )
+    fig_residuals.update_yaxes(
+        title_text="Measured minus predicted conversion (pp)", secondary_y=False
+    )
+    fig_residuals.update_yaxes(
+        title_text="Measured minus predicted firing (kW)", secondary_y=True
+    )
+
+    st.plotly_chart(fig_residuals, width="stretch")
+
+    st.caption(
+        "One residual cannot say what is wrong, only that something is. Conversion "
+        "falling short of prediction points at the catalyst. Firing running above "
+        "prediction at the same duty points at the heat exchanger. Reading them "
+        "together separates a fouled recuperator from an ageing catalyst, which a "
+        "single overall performance number would confuse."
+    )
 
 st.header("Process Flow Diagram")
 

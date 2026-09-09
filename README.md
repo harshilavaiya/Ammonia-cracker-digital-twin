@@ -15,8 +15,10 @@ The project is developed using Python and Streamlit.
 | `thermo.py` | Ideal-gas heat capacities, equilibrium constant, equilibrium conversion |
 | `model.py` | Reactor kinetics, mass and energy balance, purification, safety logic |
 | `dynamics.py` | Transient reactor model for start-up and load following |
+| `twin.py` | Measurement ingestion, reconciliation and fault diagnosis |
 | `dashboard.py` | Streamlit user interface and charts |
-| `test_model.py`, `test_dynamics.py` | Test suite, run with `pytest -q` |
+| `data/plant_campaign.csv` | Demonstration measurement history, regenerate with `python twin.py` |
+| `test_*.py` | Test suite, run with `pytest -q` |
 
 ### Running
 
@@ -280,7 +282,80 @@ to 16 kW flips the binding constraint, which the model reports.
 
 A 60 % load step produces a ±7 °C excursion that recovers in about three minutes.
 
-## 8. Chart Analysis
+## 8. Live Data and Model Divergence
+
+Everything above is prediction. A simulator predicts; a twin also **listens**. It reads
+what the physical asset actually did, runs the model on the same measured inputs, and
+watches the gap. A model that agrees with the plant tells you nothing new. A residual
+that drifts tells you something in the plant has changed.
+
+### The sensor boundary
+
+Only what a real unit would actually instrument is recorded:
+
+```text
+time, NH3 flow, temperature, pressure, outlet NH3 analyser, firing rate, product flow
+```
+
+Conversion is **not** measured. It is inferred from the analyser, since for a pure
+ammonia feed `y = (1 − x)/(1 + x)` inverts to `x = (1 − y)/(1 + y)`. Space velocity is
+likewise derived from the flow and the known bed volume. Getting this boundary right
+matters: a twin that assumes it can measure its own internal states is not one.
+
+`read_csv` is the seam. Replacing it with an MQTT subscription or a historian query
+changes nothing downstream, because everything after it works on a list of records.
+
+### Inferring what changed
+
+The forward model is `x = x_eq·(1 − e^(−Da))` with `Da = k(T)·a/GHSV`, so the catalyst
+activity inverts in closed form:
+
+```text
+approach = x / x_eq
+Da       = −ln(1 − approach)
+a        = Da · GHSV / k(T)
+```
+
+The estimator returns nothing when the reactor sits on its equilibrium ceiling, because
+a reading there carries no information about activity: any sufficiently active catalyst
+would look identical.
+
+### What the demonstration campaign shows
+
+`data/plant_campaign.csv` is 2,001 samples over 4,000 operating hours, with two faults
+injected that the model is never told about: the catalyst decays exponentially and the
+recuperator fouls. Both are deliberately subtle.
+
+| | Start | After 4,000 h |
+| --- | --- | --- |
+| Conversion | 99.48 % | 99.21 % |
+| NH₃ at reactor outlet | 2,584 ppmv | 3,985 ppmv |
+| Inferred catalyst activity | 102 % | 73 % |
+
+Conversion falls by roughly a quarter of a percentage point. Nobody would notice that
+on a trend display. Meanwhile the ammonia the purification train has to handle rises by
+half again, and the inferred activity has fallen to 73 % against a true value of 71.7 %
+— recovered from noisy analyser readings.
+
+### Two residuals, because one is not enough
+
+A single residual says something is wrong, not what. The twin watches two:
+
+| Residual | Signature | Diagnosis |
+| --- | --- | --- |
+| Conversion below prediction | drifts negative | catalyst losing activity |
+| Firing above prediction at the same duty | drifts positive | fouled recuperator |
+
+Run either fault alone and only its own finding is raised, which is the test that the
+diagnosis actually discriminates rather than just alarming.
+
+From the activity trend the twin projects when the catalyst stops holding the product
+on specification: bisection finds the critical activity (32.8 % here), and the fitted
+decline gives roughly **224 days** to replacement. That projection is suppressed when
+the decline is too small to distinguish from noise, because turning a noise-fitted
+slope into a maintenance date is false precision dressed up as a plan.
+
+## 9. Chart Analysis
 
 The dashboard includes four chart analyses:
 
@@ -314,7 +389,7 @@ The dashboard includes four chart analyses:
 
 These charts help understand the relationship between operating conditions and system performance.
 
-## 9. Limitations
+## 10. Limitations
 
 This is a conceptual model, not a design tool. The main simplifications are:
 
@@ -331,7 +406,9 @@ This is a conceptual model, not a design tool. The main simplifications are:
   carries ammonia is a real permitting concern and is not represented.
 * The transient model lumps the reactor into a single temperature. A real bed has an
   axial profile, and the vessel wall and catalyst do not heat at the same rate.
-* The model predicts; it does not yet listen. A digital twin should ingest measurements
-  from the physical asset and track the divergence between the two. Until it does, this
-  is a simulator rather than a twin.
+* The measurement history is synthetic. The reconciliation and diagnosis logic is
+  real, but it has never been pointed at a physical asset, and the faults it detects
+  are the ones deliberately injected into the campaign.
+* Only two fault modes are modelled. A thermocouple reading high would mimic catalyst
+  deactivation, and nothing here separates a sensor fault from a process fault.
 * Kinetic parameters are illustrative and have not been fitted to experimental data.
